@@ -1,0 +1,83 @@
+[project]
+name = "variable-importance"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Matthew Reda", email = "m.reda94@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "jax>=0.8.0",
+    "loguru>=0.7.3",
+    "matplotlib>=3.10.7",
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "pillow>=12.0.0",
+    "pydantic>=2.12.4",
+    "python-dotenv>=1.2.1",
+    "rich>=14.2.0",
+    "seaborn>=0.13.2",
+    "shap>=0.49.1",
+    "sqlalchemy>=2.0.44",
+    "torch>=2.9.0",
+    "uvicorn[standard]>=0.38.0",
+    "websockets>=15.0.1",
+    "xarray>=2025.10.1",
+]
+
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.workspace]
+members = ["app"]
+
+[tool.uv.sources]
+variable-importance = { workspace = true }
+
+[dependency-groups]
+stats = [
+    "scikit-learn>=1.7.2",
+    "statsmodels>=0.14.5",
+    "xgboost>=3.1.1",
+]
+prob = [
+    "numba>=0.62.1",
+    "numpyro>=0.19.0",
+    "nutpie>=0.16.2",
+    "pymc>=5.26.1",
+]
+jupyter = [
+    "ipykernel>=7.1.0",
+    "ipywidgets>=8.1.7",
+]
+pptx = [
+    "python-pptx>=1.0.2",
+]
+ai = [
+    "chromadb>=1.3.4",
+    "deepagents>=0.2.5",
+    "langchain>=1.0.4",
+    "langchain-ollama>=1.0.0",
+    "langchain-openai>=1.0.2",
+    "langgraph>=1.0.2",
+    "ollama>=0.6.0",
+]
+server = [
+    "fastapi[standard]>=0.121.0",
+    "python-multipart>=0.0.20",
+    "redis>=7.0.1",
+    "uvicorn[standard]>=0.38.0",
+]
+frontend = [
+    "streamlit>=1.51.0",
+]
+dev = [
+    "variable-importance",
+]
+
+[project.scripts]
+variable-importance = "variable_importance.main:main"
