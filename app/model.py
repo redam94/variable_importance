@@ -1,9 +1,10 @@
 import os
-from typing import TypedDict, Annotated, List, Any, Union
+from typing import TypedDict, Annotated, List, Any, Union, Optional, Dict
 import operator
 from pathlib import Path
 from loguru import logger
 import base64
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 from langchain_ollama import ChatOllama
@@ -25,9 +26,11 @@ def cp_data_to_folder(input_path: str, output_path: str) -> None:
         os.makedirs(os.path.dirname(output_path))
     shutil.copy(input_path, output_path)
 
+
 class Code(BaseModel):
     code: str = Field(..., description="Python code to be executed")
     task: str = Field(..., description="Description of the task to be performed")
+
 
 class State(TypedDict):
     code: str
@@ -40,26 +43,268 @@ class State(TypedDict):
     existing_outputs: dict
     plot_analyses: Annotated[List[dict], operator.add]
     skip_execution: bool
-    workflow_id: str  # NEW: Track workflow ID for RAG
+    workflow_id: str  # Track workflow ID for RAG
+    rag_context: dict  # Store RAG query results
+    can_answer_from_rag: bool  # Flag if RAG has sufficient info
+    stage_metadata: dict  # Metadata for stage tracking
+
 
 class GraphState(TypedDict):
     graph_summary: str
     graph_summaries: Annotated[List[str], operator.add]
 
+
 class ExecutionDeps(TypedDict):
     executor: OutputCapturingExecutor
     output_manager: OutputManager
-    plot_cache: PlotAnalysisCache  # NEW: Plot analysis cache
-    rag: ContextRAG  # NEW: RAG system
+    plot_cache: PlotAnalysisCache
+    rag: ContextRAG
+
+
+def check_rag_for_answer(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
+    """
+    NEW FIRST STEP: Check RAG for relevant context to answer user's query.
+    This is the primary entry point to check if we can answer without new execution.
+    """
+    rag = runtime.context.get("rag")
+    workflow_id = state.get("workflow_id", "default")
+    stage_name = state.get("stage_name", "")
+    
+    # Get user's latest query
+    user_messages = state.get("messages", [])
+    latest_query = user_messages[-1].content if user_messages else ""
+    
+    logger.info(f"🔍 Checking RAG for existing context to answer: '{latest_query[:100]}...'")
+    
+    # Initialize return values
+    rag_context = {
+        "has_relevant_context": False,
+        "contexts": [],
+        "summary": "",
+        "confidence": 0.0
+    }
+    can_answer_from_rag = False
+    
+    if not rag or not rag.enabled:
+        logger.info("❌ RAG not available, proceeding with standard workflow")
+        return {
+            "rag_context": rag_context,
+            "can_answer_from_rag": can_answer_from_rag
+        }
+    
+    # Query RAG for all relevant context types
+    try:
+        # Get various types of relevant information
+        plot_contexts = rag.query_relevant_context(
+            query=latest_query,
+            workflow_id=workflow_id,
+            doc_types=["plot_analysis"],
+            n_results=5
+        )
+        
+        code_contexts = rag.query_relevant_context(
+            query=latest_query,
+            workflow_id=workflow_id,
+            doc_types=["code_execution"],
+            n_results=3
+        )
+        
+        summary_contexts = rag.query_relevant_context(
+            query=latest_query,
+            workflow_id=workflow_id,
+            doc_types=["summary"],
+            n_results=3
+        )
+        
+        all_contexts = plot_contexts + code_contexts + summary_contexts
+        
+        if all_contexts:
+            rag_context["has_relevant_context"] = True
+            rag_context["contexts"] = all_contexts
+            
+            # Get a comprehensive summary
+            rag_summary = rag.get_context_summary(
+                query=latest_query,
+                workflow_id=workflow_id,
+                max_tokens=1500
+            )
+            rag_context["summary"] = rag_summary
+            
+            # Determine if we have enough context to answer directly
+            # Use LLM to assess if RAG context is sufficient
+            assessment_llm = ChatOllama(
+                model="gpt-oss:20b",
+                temperature=0,
+                base_url="http://100.91.155.118:11434"
+            )
+            
+            class RAGAssessment(BaseModel):
+                sufficient_to_answer: bool = Field(
+                    description="Whether the RAG context is sufficient to answer the user's query"
+                )
+                confidence: float = Field(
+                    description="Confidence level (0-1) that the context is sufficient",
+                    ge=0.0, le=1.0
+                )
+                reasoning: str = Field(
+                    description="Brief explanation of the assessment"
+                )
+            
+            structured_llm = assessment_llm.with_structured_output(RAGAssessment)
+            
+            assessment_prompt = f"""
+            User Query: {latest_query}
+            
+            Available Context from Previous Work:
+            {rag_summary[:2000]}
+            
+            Number of relevant documents found: {len(all_contexts)}
+            - Plot analyses: {len(plot_contexts)}
+            - Code executions: {len(code_contexts)}
+            - Summaries: {len(summary_contexts)}
+            
+            Assess whether this context is sufficient to answer the user's query without running new code.
+            Consider:
+            1. Does the context directly address the user's question?
+            2. Is the information complete and current?
+            3. Would running new code likely provide significantly better information?
+            """
+            
+            assessment = structured_llm.invoke([
+                SystemMessage(
+                    content="Assess if the provided context is sufficient to answer the user's query."
+                ),
+                HumanMessage(content=assessment_prompt)
+            ])
+            
+            rag_context["confidence"] = assessment.confidence
+            can_answer_from_rag = assessment.sufficient_to_answer
+            
+            logger.info(f"✅ RAG Assessment: sufficient={assessment.sufficient_to_answer}, "
+                       f"confidence={assessment.confidence:.2f}")
+            logger.info(f"   Reasoning: {assessment.reasoning}")
+            
+            # Add stage metadata for tracking
+            stage_metadata = {
+                "rag_documents_found": len(all_contexts),
+                "rag_assessment_sufficient": assessment.sufficient_to_answer,
+                "rag_assessment_confidence": assessment.confidence,
+                "rag_assessment_reasoning": assessment.reasoning,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            # Store this assessment in RAG for learning
+            if assessment.sufficient_to_answer:
+                rag.add_summary(
+                    summary=f"Query answered from RAG context: {latest_query[:100]}",
+                    stage_name=f"{stage_name}_rag_answer",
+                    workflow_id=workflow_id,
+                    metadata=stage_metadata
+                )
+        else:
+            logger.info("❌ No relevant context found in RAG")
+            stage_metadata = {
+                "rag_documents_found": 0,
+                "timestamp": datetime.now().isoformat()
+            }
+    
+    except Exception as e:
+        logger.error(f"❌ Error querying RAG: {e}")
+        stage_metadata = {"error": str(e)}
+    
+    return {
+        "rag_context": rag_context,
+        "can_answer_from_rag": can_answer_from_rag,
+        "stage_metadata": stage_metadata
+    }
+
+
+def route_after_rag_check(state: State, runtime: Runtime[ExecutionDeps]) -> str:
+    """
+    Route based on RAG assessment.
+    If RAG has sufficient info, go straight to summary.
+    Otherwise, continue with normal workflow.
+    """
+    if state.get("can_answer_from_rag", False):
+        logger.info("➡️ Routing to summarize (RAG has sufficient context)")
+        return "summarize_from_rag"
+    else:
+        logger.info("➡️ Routing to check existing outputs (need more analysis)")
+        return "check_existing_outputs"
+
+
+def summarize_from_rag(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
+    """
+    Generate summary directly from RAG context without code execution.
+    """
+    logger.info("📝 Generating summary from RAG context...")
+    
+    rag_context = state.get("rag_context", {})
+    user_messages = state.get("messages", [])
+    latest_query = user_messages[-1].content if user_messages else ""
+    
+    llm = ChatOllama(
+        model="gemma3:27b",
+        temperature=0,
+        base_url="http://100.91.155.118:11434"
+    )
+    
+    # Build comprehensive context from RAG
+    context_parts = [
+        "=== Answer based on previous analysis ===",
+        "",
+        rag_context.get("summary", ""),
+        "",
+        f"Confidence: {rag_context.get('confidence', 0):.1%}",
+        f"Sources: {len(rag_context.get('contexts', []))} relevant documents"
+    ]
+    
+    context = "\n".join(context_parts)
+    
+    response = llm.invoke([
+        SystemMessage(
+            content="""
+            Answer the user's query using the provided context from previous analyses.
+            Be specific and reference the relevant findings.
+            Make it clear this is based on existing analysis results.
+            Do not mention technical details about RAG or context retrieval.
+            """
+        ),
+        HumanMessage(content=f"Query: {latest_query}"),
+        HumanMessage(content=f"Context:\n{context}")
+    ])
+    
+    # Store this interaction in RAG
+    rag = runtime.context.get("rag")
+    workflow_id = state.get("workflow_id", "default")
+    stage_name = state.get("stage_name", "")
+    
+    if rag and rag.enabled:
+        rag.add_summary(
+            summary=f"RAG-based answer: {response.content[:500]}",
+            stage_name=f"{stage_name}_rag_response",
+            workflow_id=workflow_id,
+            metadata={
+                "answered_from_rag": True,
+                "query": latest_query[:200],
+                "timestamp": datetime.now().isoformat()
+            }
+        )
+    
+    logger.info("✅ Generated summary from RAG context")
+    
+    return {"summary": response.content}
 
 
 def check_existing_outputs(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
     """
     Check for existing outputs and artifacts from previous executions.
-    Enhanced with cache checking.
+    Enhanced with cache checking and RAG integration.
     """
     output_manager = runtime.context["output_manager"]
+    rag = runtime.context.get("rag")
     stage_name = state.get("stage_name", "")
+    workflow_id = state.get("workflow_id", "default")
     
     existing = {
         "has_plots": False,
@@ -103,6 +348,18 @@ def check_existing_outputs(state: State, runtime: Runtime[ExecutionDeps]) -> dic
             with open(console_output_file, 'r') as f:
                 existing["console_output"] = f.read()
             logger.info(f"📄 Found existing console output")
+            
+            # Add console output to RAG if not already there
+            if rag and rag.enabled and existing["console_output"]:
+                rag.add_code_execution(
+                    code="# Previous execution",
+                    stdout=existing["console_output"][:1000],
+                    stderr="",
+                    stage_name=stage_name,
+                    workflow_id=workflow_id,
+                    success=True,
+                    metadata={"from_existing": True, "timestamp": datetime.now().isoformat()}
+                )
         
         # Check for previous code
         for code_file in stage_dir.glob("*.py"):
@@ -157,6 +414,17 @@ def analyze_plots_with_vision_llm(state: State, runtime: Runtime[ExecutionDeps])
                 if cached_analysis:
                     analyses.append(cached_analysis)
                     logger.info(f"⚡ Used cached analysis: {plot_name}")
+                    
+                    # Still add to RAG for this workflow if not present
+                    if rag and rag.enabled:
+                        rag.add_plot_analysis(
+                            plot_name=plot_name,
+                            plot_path=plot_path,
+                            analysis=cached_analysis['analysis'],
+                            stage_name=stage_name,
+                            workflow_id=workflow_id,
+                            metadata={"from_cache": True, "timestamp": datetime.now().isoformat()}
+                        )
                     continue
             
             # Not in cache - analyze with vision LLM
@@ -199,7 +467,8 @@ def analyze_plots_with_vision_llm(state: State, runtime: Runtime[ExecutionDeps])
                     plot_path=plot_path,
                     analysis=response.content,
                     stage_name=stage_name,
-                    workflow_id=workflow_id
+                    workflow_id=workflow_id,
+                    metadata={"timestamp": datetime.now().isoformat()}
                 )
             
             logger.info(f"✅ Analyzed and cached: {plot_name}")
@@ -218,32 +487,19 @@ def analyze_plots_with_vision_llm(state: State, runtime: Runtime[ExecutionDeps])
 def determine_if_code_needed(state: State, runtime: Runtime[ExecutionDeps]) -> str:
     """
     Enhanced routing with RAG-based context retrieval.
-    Uses RAG to get only relevant context, reducing token usage.
+    Uses both existing outputs and RAG context to make decision.
     """
+    logger.info("🤔 Determining if new code execution is needed...")
     if state.get("input_data_path") is None:
         return "no_code"
     
     user_query = state["messages"]
     existing_outputs = state.get("existing_outputs", {})
     plot_analyses = state.get("plot_analyses", [])
-    
-    # NEW: Use RAG to get relevant context
-    rag = runtime.context.get("rag")
-    workflow_id = state.get("workflow_id", "default")
-    stage_name = state.get("stage_name", "")
+    rag_context = state.get("rag_context", {})
     
     # Get latest user message
     latest_message = user_query[-1].content if user_query else ""
-    
-    # Query RAG for relevant context (token-efficient)
-    rag_context = ""
-    if rag and rag.enabled:
-        rag_context = rag.get_context_summary(
-            query=latest_message,
-            workflow_id=workflow_id,
-            stage_name=stage_name,
-            max_tokens=1000  # Limit context size
-        )
     
     class DecisionReasoning(BaseModel):
         can_answer_from_existing: bool = Field(...)
@@ -251,14 +507,21 @@ def determine_if_code_needed(state: State, runtime: Runtime[ExecutionDeps]) -> s
         reasoning: str = Field(...)
     
     llm = ChatOllama(
-        model="gpt-oss:20b",
+        model="qwen3:30b",
         temperature=0,
         base_url="http://100.91.155.118:11434"
     )
     structured_llm = llm.with_structured_output(DecisionReasoning)
     
-    # Build concise context
+    # Build concise context including RAG info
     context_parts = []
+    
+    # Include RAG context summary if available
+    if rag_context.get("has_relevant_context"):
+        context_parts.append(f"📚 RAG Context Available: {len(rag_context.get('contexts', []))} documents")
+        if rag_context.get("summary"):
+            brief_rag = rag_context["summary"][:300] + "..."
+            context_parts.append(f"RAG Summary: {brief_rag}")
     
     if existing_outputs.get("has_plots"):
         context_parts.append(f"📊 Available: {len(existing_outputs['plots'])} plots")
@@ -270,10 +533,6 @@ def determine_if_code_needed(state: State, runtime: Runtime[ExecutionDeps]) -> s
             brief = pa['analysis'][:150] + "..." if len(pa['analysis']) > 150 else pa['analysis']
             context_parts.append(f"  • {pa['plot_name']}: {brief}")
     
-    if rag_context:
-        context_parts.append("\n📚 Relevant context from RAG:")
-        context_parts.append(rag_context[:500])  # Limit RAG context
-    
     context = "\n".join(context_parts) if context_parts else "No existing outputs"
     
     result = structured_llm.invoke([
@@ -282,8 +541,11 @@ def determine_if_code_needed(state: State, runtime: Runtime[ExecutionDeps]) -> s
             
             Available context:
             {context}
+
+            Data provided at: `{Path(state['input_data_path']).name}`
             
-            Prefer using existing outputs when they sufficiently answer the query."""
+            Consider both existing outputs and RAG context.
+            Prefer using existing information when sufficient."""
         ),
         HumanMessage(content=latest_message)
     ])
@@ -299,9 +561,25 @@ def determine_if_code_needed(state: State, runtime: Runtime[ExecutionDeps]) -> s
         return "use_existing"
 
 
+def determine_code_decision_node(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
+    """
+    Decision node for code execution when no plots exist.
+    """
+    decision = determine_if_code_needed(state, runtime)
+    return {"skip_execution": decision == "use_existing"}
+
+
+def route_after_decision(state: State, runtime: Runtime[ExecutionDeps]) -> str:
+    """Route based on the skip_execution decision."""
+    if state.get("skip_execution", False):
+        return "summarize_results"
+    else:
+        return "write_code"
+
+
 def write_code_for_task(state: State, runtime: Runtime[ExecutionDeps]) -> str:
     """
-    Enhanced code generation with RAG context.
+    Enhanced code generation with comprehensive RAG context.
     """
     code_llm = ChatOllama(
         model="qwen3-coder:30b",
@@ -313,27 +591,37 @@ def write_code_for_task(state: State, runtime: Runtime[ExecutionDeps]) -> str:
     input_data_path = Path(state["input_data_path"])
     user_query = state["messages"]
     existing_outputs = state.get("existing_outputs", {})
+    rag_context = state.get("rag_context", {})
     
     # Get relevant context from RAG
     rag = runtime.context.get("rag")
     workflow_id = state.get("workflow_id", "default")
     latest_message = user_query[-1].content if user_query else ""
     
-    rag_context = ""
+    # Get code-specific context from RAG
+    code_examples = []
     if rag and rag.enabled:
-        rag_context = rag.get_context_summary(
+        code_contexts = rag.query_relevant_context(
             query=latest_message,
             workflow_id=workflow_id,
-            max_tokens=800
+            doc_types=["code_execution"],
+            n_results=2
         )
+        for ctx in code_contexts:
+            if "Code:" in ctx.get("document", ""):
+                code_examples.append(ctx["document"][:500])
     
     context_info = []
     if existing_outputs.get("has_plots"):
-        context_info.append(f"Note: {len(existing_outputs['plots'])} plots exist")
-    if existing_outputs.get("previous_code"):
-        context_info.append("Note: Previous code exists")
-    if rag_context:
-        context_info.append(f"Relevant previous work:\n{rag_context[:300]}")
+        context_info.append(f"Note: {len(existing_outputs['plots'])} plots already exist from previous analysis")
+    
+    if code_examples:
+        context_info.append("Previous relevant code approaches:")
+        for example in code_examples[:2]:
+            context_info.append(f"```python\n{example}\n```")
+    
+    if rag_context.get("summary"):
+        context_info.append(f"Context from previous work: {rag_context['summary'][:300]}")
     
     context_str = "\n".join(context_info) if context_info else ""
     
@@ -346,6 +634,8 @@ def write_code_for_task(state: State, runtime: Runtime[ExecutionDeps]) -> str:
     Always load the data from `{input_data_path.name}`.
     
     {context_str}
+    
+    Build upon previous work if relevant, but create new analysis as requested.
     """
     
     code = structured_code_llm.invoke([
@@ -366,7 +656,7 @@ def move_data_to_execution_folder(state: State, runtime: Runtime[ExecutionDeps])
 
 async def execute_code(state: State, runtime: Runtime[ExecutionDeps]) -> Any:
     """
-    Execute code and store results in RAG.
+    Execute code and store results in RAG for future queries.
     """
     executor = runtime.context["executor"]
     output_manager = runtime.context["output_manager"]
@@ -375,6 +665,7 @@ async def execute_code(state: State, runtime: Runtime[ExecutionDeps]) -> Any:
     stage_name = state["stage_name"]
     workflow_id = state.get("workflow_id", "default")
     code = state["code"]
+    stage_metadata = state.get("stage_metadata", {})
 
     result = await executor.execute_with_output_manager(
         code=code,
@@ -383,16 +674,42 @@ async def execute_code(state: State, runtime: Runtime[ExecutionDeps]) -> Any:
         code_filename="code_with_data.py"
     )
     
-    # Add execution results to RAG
+    # Add execution results to RAG with enhanced metadata
     if rag and rag.enabled:
+        # Prepare metadata - ensure no lists or complex types
+        execution_metadata = {
+            "execution_time": result.execution_time_seconds,
+            "file_count": len(result.generated_files) if result.generated_files else 0,
+            "timestamp": datetime.now().isoformat()
+        }
+        
+        # Add stage metadata if present (already cleaned)
+        if stage_metadata:
+            execution_metadata.update(stage_metadata)
+        
+        # Add code execution
         rag.add_code_execution(
             code=code,
             stdout=result.stdout,
             stderr=result.stderr,
             stage_name=stage_name,
             workflow_id=workflow_id,
-            success=result.success
+            success=result.success,
+            metadata=execution_metadata
         )
+        
+        # If there are generated files, add summary about them
+        if result.generated_files:
+            file_summary = f"Generated {len(result.generated_files)} files: {', '.join(result.generated_files[:5])}"
+            rag.add_summary(
+                summary=file_summary,
+                stage_name=f"{stage_name}_files",
+                workflow_id=workflow_id,
+                metadata={
+                    "file_count": len(result.generated_files),
+                    "file_names": ", ".join(result.generated_files[:10])  # Convert list to string
+                }
+            )
 
     return {'code_output': result}
 
@@ -422,15 +739,28 @@ def check_execution_success(state: State, runtime: Runtime[ExecutionDeps]) -> st
         return "FAILURE"
 
 
+def route_after_check_outputs(state: State, runtime: Runtime[ExecutionDeps]) -> str:
+    """Route based on whether plots exist to analyze."""
+    if state["existing_outputs"].get("has_plots"):
+        return "analyze_plots"
+    else:
+        return "determine_code_needed"
+
+
 def summarize_results(state: State, runtime: Runtime[ExecutionDeps]) -> str:
     """
-    Enhanced summarization with RAG context (token-efficient).
+    Enhanced summarization that combines all sources:
+    - RAG context from previous work
+    - Current execution results
+    - Plot analyses
+    Stores comprehensive summary in RAG for future use.
     """
     code_output = state.get("code_output", None)
     plot_analyses = state.get("plot_analyses", [])
     existing_outputs = state.get("existing_outputs", {})
+    rag_context = state.get("rag_context", {})
     
-    # Get RAG context
+    # Get RAG and workflow info
     rag = runtime.context.get("rag")
     workflow_id = state.get("workflow_id", "default")
     stage_name = state.get("stage_name", "")
@@ -449,91 +779,93 @@ def summarize_results(state: State, runtime: Runtime[ExecutionDeps]) -> str:
         base_url="http://100.91.155.118:11434/"
     )
     
-    # Build concise context using RAG
+    # Build comprehensive context
     context_parts = []
     
+    # Include RAG context if available
+    if rag_context.get("has_relevant_context") and rag_context.get("summary"):
+        context_parts.append("=== Previous Related Work ===")
+        context_parts.append(rag_context["summary"][:800])
+        context_parts.append("")
+    
+    # Include current execution results
     if stdout or error:
-        context_parts.append("=== Execution Output ===")
-        context_parts.append(f"Output: {stdout[:500]}")  # Truncate
+        context_parts.append("=== Current Analysis Results ===")
+        context_parts.append(f"Output: {stdout[:500]}")
         if error:
             context_parts.append(f"Errors: {error[:200]}")
+        context_parts.append("")
     
-    # Add plot analyses (brief)
+    # Include plot analyses
     if plot_analyses:
-        context_parts.append("\n=== Visual Analysis ===")
-        for i, pa in enumerate(plot_analyses[:3], 1):  # Max 3
+        context_parts.append("=== Visual Analysis ===")
+        for i, pa in enumerate(plot_analyses[:3], 1):
             brief = pa['analysis'][:200] + "..." if len(pa['analysis']) > 200 else pa['analysis']
             context_parts.append(f"Plot {i} ({pa['plot_name']}): {brief}")
-    
-    # Add RAG context (most token-efficient)
-    if rag and rag.enabled:
-        rag_summary = rag.get_context_summary(
-            query=latest_query,
-            workflow_id=workflow_id,
-            stage_name=stage_name,
-            max_tokens=500  # Limit to save tokens
-        )
-        if rag_summary:
-            context_parts.append("\n=== Relevant Previous Work ===")
-            context_parts.append(rag_summary)
+        context_parts.append("")
     
     context = "\n".join(context_parts)
     
+    # Generate comprehensive summary
+    summary_prompt = """
+    Provide a comprehensive answer to the user's query using ALL available context.
+    
+    Structure your response to:
+    1. Directly answer the user's question
+    2. Reference specific findings from the analysis
+    3. Mention relevant visualizations when applicable
+    4. Build upon previous work if relevant
+    5. Be concise but thorough
+    
+    Do not mention technical implementation details.
+    """
+    
     summary = llm.invoke([
-        SystemMessage(
-            content="""
-            Answer the user's query using the provided context.
-            Focus on insights and findings, not code details.
-            Reference specific visualizations when relevant.
-            Be concise but comprehensive.
-            """
-        ),
-        HumanMessage(content=latest_query),
+        SystemMessage(content=summary_prompt),
+        HumanMessage(content=f"User Query: {latest_query}"),
         HumanMessage(content=f"Context:\n\n{context}")
     ])
     
-    # Store summary in RAG
+    # Store comprehensive summary in RAG
     if rag and rag.enabled:
+        # Store the main summary
         rag.add_summary(
             summary=summary.content,
             stage_name=stage_name,
-            workflow_id=workflow_id
+            workflow_id=workflow_id,
+            metadata={
+                "query": latest_query[:200],
+                "had_rag_context": rag_context.get("has_relevant_context", False),
+                "had_code_execution": code_output is not None,
+                "had_plot_analysis": len(plot_analyses) > 0,
+                "plot_analysis_count": len(plot_analyses),
+                "timestamp": datetime.now().isoformat()
+            }
         )
+        
+        # Store query-response pair for better future retrieval
+        rag.add_summary(
+            summary=f"Q: {latest_query}\nA: {summary.content[:500]}",
+            stage_name=f"{stage_name}_qa",
+            workflow_id=workflow_id,
+            metadata={"type": "question_answer_pair", "timestamp": datetime.now().isoformat()}
+        )
+    
+    logger.info("✅ Generated comprehensive summary")
     
     return {'summary': summary.content}
 
 
 # ============================================================================
-# BUILD ENHANCED WORKFLOW GRAPH
+# BUILD ENHANCED WORKFLOW GRAPH WITH RAG AS FIRST STEP
 # ============================================================================
 
-def route_after_check_outputs(state: State, runtime: Runtime[ExecutionDeps]) -> str:
-    """Route based on whether plots exist to analyze."""
-    if state["existing_outputs"].get("has_plots"):
-        return "analyze_plots"
-    else:
-        return "determine_code_needed"
-
-
-def determine_code_decision_node(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
-    """
-    Decision node for code execution when no plots exist.
-    """
-    decision = determine_if_code_needed(state, runtime)
-    return {"skip_execution": decision == "use_existing"}
-
-
-def route_after_decision(state: State, runtime: Runtime[ExecutionDeps]) -> str:
-    """Route based on the skip_execution decision."""
-    if state.get("skip_execution", False):
-        return "summarize_results"
-    else:
-        return "write_code"
-
-
+# Create the enhanced workflow graph
 code_graph = StateGraph(State, ExecutionDeps)
 
-# Add all nodes
+# Add all nodes (including new RAG-first nodes)
+code_graph.add_node("check_rag", check_rag_for_answer)  # NEW: First step
+code_graph.add_node("summarize_from_rag", summarize_from_rag)  # NEW: Direct RAG answer
 code_graph.add_node("check_existing_outputs", check_existing_outputs)
 code_graph.add_node("analyze_plots", analyze_plots_with_vision_llm)
 code_graph.add_node("determine_code_needed", determine_code_decision_node)
@@ -543,9 +875,23 @@ code_graph.add_node("execute_code", execute_code)
 code_graph.add_node("fix_code", code_fix)
 code_graph.add_node("summarize_results", summarize_results)
 
-# Routing
-code_graph.add_edge(START, "check_existing_outputs")
+# Define edges - START WITH RAG CHECK
+code_graph.add_edge(START, "check_rag")  # CHANGED: Start with RAG check
 
+# Route after RAG check
+code_graph.add_conditional_edges(
+    "check_rag",
+    route_after_rag_check,
+    {
+        "summarize_from_rag": "summarize_from_rag",  # Can answer directly from RAG
+        "check_existing_outputs": "check_existing_outputs"  # Need more analysis
+    }
+)
+
+# Direct RAG answer ends the workflow
+code_graph.add_edge("summarize_from_rag", END)
+
+# Continue with existing workflow if RAG isn't sufficient
 code_graph.add_conditional_edges(
     "check_existing_outputs",
     route_after_check_outputs,
@@ -574,7 +920,9 @@ code_graph.add_conditional_edges(
 code_graph.add_edge("fix_code", "execute_code")
 code_graph.add_edge("summarize_results", END)
 
-# Compile the workflow
+# Compile the enhanced workflow
 code_workflow = code_graph.compile()
 
-logger.info("✅ Enhanced code workflow compiled successfully (with caching and RAG)")
+logger.info("✅ Enhanced RAG-first workflow compiled successfully!")
+logger.info("   Workflow now starts by checking RAG for existing context")
+logger.info("   All stages persist data to RAG for future queries within the workflow")

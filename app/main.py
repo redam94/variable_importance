@@ -8,10 +8,12 @@ import tempfile
 import os
 import asyncio
 from model import code_workflow, OutputCapturingExecutor, OutputManager
+from plot_analysis_cache import PlotAnalysisCache
+from context_rag import ContextRAG
 
 # Page configuration
 st.set_page_config(
-    page_title="Data Science Agent",
+    page_title="Data Science Agent with RAG",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -57,6 +59,16 @@ st.markdown("""
         border-left: 4px solid #667eea;
         margin-bottom: 0.5rem;
     }
+    .rag-status {
+        background-color: #e8f5e9;
+        padding: 0.5rem;
+        border-radius: 0.25rem;
+        margin-bottom: 0.5rem;
+        font-size: 0.9rem;
+    }
+    .rag-disabled {
+        background-color: #ffebee;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -72,7 +84,7 @@ def fetch_models():
     return ["gpt-oss:20b"]  # Default fallback
 
 def initialize_session_state():
-    """Initialize all session state variables"""
+    """Initialize all session state variables including RAG and caching"""
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "executor" not in st.session_state:
@@ -85,9 +97,20 @@ def initialize_session_state():
         st.session_state.uploaded_file_name = None
     if "workflow_id" not in st.session_state:
         st.session_state.workflow_id = "analysis_workflow"
+    
+    # Initialize RAG and caching systems
+    if "plot_cache" not in st.session_state:
+        st.session_state.plot_cache = PlotAnalysisCache()
+    if "rag" not in st.session_state:
+        st.session_state.rag = ContextRAG(
+            collection_name=st.session_state.workflow_id,
+            persist_directory="cache/rag_db"
+        )
+    if "rag_enabled" not in st.session_state:
+        st.session_state.rag_enabled = True
 
 def render_sidebar():
-    """Render sidebar with configuration options"""
+    """Render sidebar with configuration options including RAG controls"""
     with st.sidebar:
         st.markdown("### ⚙️ Configuration")
         
@@ -107,7 +130,7 @@ def render_sidebar():
         work_id = st.text_input(
             "Workflow ID",
             value=st.session_state.workflow_id,
-            help="Unique identifier for this workflow"
+            help="Unique identifier for this workflow. RAG context is isolated per workflow."
         )
         
         stage_name = st.text_input(
@@ -116,13 +139,63 @@ def render_sidebar():
             help="Name of the current analysis stage"
         )
         
-        # Initialize output manager
+        # Initialize/update workflow components
         if work_id and work_id != st.session_state.workflow_id:
             st.session_state.workflow_id = work_id
             st.session_state.output_mgr = OutputManager(workflow_id=work_id)
+            
+            # Update RAG collection for new workflow
+            st.session_state.rag = ContextRAG(
+                collection_name=work_id,
+                persist_directory="cache/rag_db"
+            )
             st.success(f"✅ Workflow initialized: `{work_id}`")
+            
         elif st.session_state.output_mgr is None:
             st.session_state.output_mgr = OutputManager(workflow_id=work_id)
+        
+        st.divider()
+        
+        # RAG System Controls
+        st.markdown("### 🧠 RAG System")
+        
+        # RAG status
+        if st.session_state.rag and st.session_state.rag.enabled:
+            rag_stats = st.session_state.rag.get_stats()
+            total_docs = rag_stats.get("total_documents", 0)
+            
+            st.markdown(f"""
+            <div class="rag-status">
+                ✅ RAG Active | {total_docs} documents
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Show document type breakdown
+            if rag_stats.get("type_breakdown"):
+                with st.expander("📊 Document Types", expanded=False):
+                    for doc_type, count in rag_stats["type_breakdown"].items():
+                        st.text(f"{doc_type}: {count}")
+        else:
+            st.markdown("""
+            <div class="rag-status rag-disabled">
+                ❌ RAG Disabled
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # RAG controls
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Clear RAG", use_container_width=True, help="Clear all RAG documents for this workflow"):
+                if st.session_state.rag:
+                    st.session_state.rag.delete_by_workflow(st.session_state.workflow_id)
+                    st.success("RAG cleared!")
+                    st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear Cache", use_container_width=True, help="Clear plot analysis cache"):
+                st.session_state.plot_cache.clear()
+                st.success("Cache cleared!")
+                st.rerun()
         
         st.divider()
         
@@ -172,7 +245,13 @@ def render_sidebar():
         if st.session_state.output_mgr:
             st.divider()
             st.markdown("### 📊 Statistics")
-            st.metric("Messages", len(st.session_state.messages))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Messages", len(st.session_state.messages))
+            with col2:
+                cache_stats = st.session_state.plot_cache.get_stats()
+                st.metric("Cached Plots", cache_stats["total_entries"])
             
             workflow_dir = st.session_state.output_mgr.workflow_dir
             if workflow_dir.exists():
@@ -191,6 +270,10 @@ def render_chat_message(message):
             st.markdown(content)
     else:
         with st.chat_message("assistant", avatar="🤖"):
+            # Check for RAG context indicator
+            if "=== Answer based on previous analysis ===" in content:
+                st.info("📚 This answer is based on previous analysis results stored in RAG")
+            
             # Check if this is a code message
             if "```python" in content and "Code:" in content:
                 with st.expander("📝 Generated Code", expanded=False):
@@ -243,13 +326,16 @@ def render_artifacts_view(output_mgr, stage_name):
         total_code_files += len(list(stage_dir.glob("*.py")))
     
     # Display summary
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("🖼️ Plots", total_plots)
     with col2:
         st.metric("📊 Data Files", total_data_files)
     with col3:
         st.metric("💾 Code Files", total_code_files)
+    with col4:
+        cache_stats = st.session_state.plot_cache.get_stats()
+        st.metric("⚡ Cached", cache_stats["total_entries"])
     
     st.divider()
     
@@ -270,7 +356,13 @@ def render_artifacts_view(output_mgr, stage_name):
                     cols = st.columns(3)
                     for idx, plot_file in enumerate(plot_files):
                         with cols[idx % 3]:
+                            # Check if cached
+                            is_cached = st.session_state.plot_cache.get(str(plot_file)) is not None
+                            if is_cached:
+                                st.caption("⚡ Cached")
+                            
                             st.image(str(plot_file), caption=plot_file.name, use_container_width=True)
+                            
                             # Add download button
                             with open(plot_file, "rb") as f:
                                 st.download_button(
@@ -343,23 +435,61 @@ def render_artifacts_view(output_mgr, stage_name):
                         if exec_info.get('error'):
                             st.error(f"Error: {exec_info['error']}")
 
-async def process_user_message(prompt, temp_file_path, stage_name, output_mgr, executor):
-    """Process user message and get agent response"""
+async def process_user_message(prompt, temp_file_path, stage_name, output_mgr, executor, plot_cache, rag, workflow_id):
+    """Process user message with enhanced RAG and caching context"""
+    
+    # Build initial state
+    initial_state = {
+        "messages": st.session_state.messages,
+        "input_data_path": temp_file_path,
+        "stage_name": stage_name,
+        "workflow_id": workflow_id,
+        "rag_context": {},
+        "can_answer_from_rag": False,
+        "stage_metadata": {}
+    }
+    
+    # Build execution context with all components
+    execution_context = {
+        'executor': executor,
+        'output_manager': output_mgr,
+        'plot_cache': plot_cache,
+        'rag': rag
+    }
+    
     response = await code_workflow.ainvoke(
-        {
-            "messages": st.session_state.messages,
-            "input_data_path": temp_file_path,
-            "stage_name": stage_name
-        },
-        context={
-            'executor': executor,
-            'output_manager': output_mgr
-        }
+        initial_state,
+        context=execution_context
     )
     return response
 
+def render_rag_insights():
+    """Render insights about RAG usage"""
+    if not st.session_state.rag or not st.session_state.rag.enabled:
+        return
+    
+    with st.expander("🧠 RAG Insights", expanded=False):
+        rag_stats = st.session_state.rag.get_stats()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Documents", rag_stats.get("total_documents", 0))
+        with col2:
+            plot_docs = rag_stats.get("type_breakdown", {}).get("plot_analysis", 0)
+            st.metric("Plot Analyses", plot_docs)
+        with col3:
+            code_docs = rag_stats.get("type_breakdown", {}).get("code_execution", 0)
+            st.metric("Code Executions", code_docs)
+        
+        # Show recent queries
+        st.markdown("**Recent Context Usage:**")
+        st.info("RAG system stores and retrieves context across queries within this workflow")
+
 def render_chat_interface(model, stage_name):
-    """Render the main chat interface"""
+    """Render the main chat interface with RAG awareness"""
+    
+    # Show RAG insights at the top
+    render_rag_insights()
     
     # Display chat history
     for message in st.session_state.messages:
@@ -372,19 +502,27 @@ def render_chat_interface(model, stage_name):
         with st.chat_message("user", avatar="👤"):
             st.markdown(prompt)
         
-        # Get agent response
-        with st.spinner("🤔 Analyzing..."):
+        # Get agent response with RAG context
+        with st.spinner("🧠 Checking existing context and analyzing..."):
             try:
                 response = asyncio.run(process_user_message(
                     prompt,
                     st.session_state.temp_file_path,
                     stage_name,
                     st.session_state.output_mgr,
-                    st.session_state.executor
+                    st.session_state.executor,
+                    st.session_state.plot_cache,
+                    st.session_state.rag,
+                    st.session_state.workflow_id
                 ))
                 
+                # Check if answer came from RAG
+                if response.get('can_answer_from_rag'):
+                    with st.chat_message("assistant", avatar="🤖"):
+                        st.success("📚 Found relevant context from previous analysis!")
+                
                 # Display code if generated
-                if 'code' in response:
+                if 'code' in response and response['code']:
                     code = response['code']
                     with st.chat_message("assistant", avatar="🤖"):
                         with st.expander("📝 Generated Code", expanded=True):
@@ -394,7 +532,7 @@ def render_chat_interface(model, stage_name):
                     )
                 
                 # Display execution output
-                if 'code_output' in response:
+                if 'code_output' in response and response['code_output']:
                     code_output = response['code_output']
                     with st.chat_message("assistant", avatar="🤖"):
                         with st.expander("💻 Execution Output", expanded=False):
@@ -415,11 +553,12 @@ def render_chat_interface(model, stage_name):
                     st.markdown(summary)
                 st.session_state.messages.append(AIMessage(content=summary))
                 
-                # Show success message
-                if 'code_output' in response and response['code_output'].success:
+                # Show success message with appropriate context
+                if response.get('can_answer_from_rag'):
+                    st.info("✅ Answered using existing context from RAG (no code execution needed)")
+                elif 'code_output' in response and response['code_output'] and response['code_output'].success:
                     st.success("✅ Analysis completed successfully!")
-                    # Automatically switch to artifacts tab hint
-                    st.info("💡 View generated plots in the **Artifacts** tab")
+                    st.info("💡 Results stored in RAG for future queries. View plots in **Artifacts** tab.")
                     
             except Exception as e:
                 st.error(f"❌ Error: {str(e)}")
@@ -428,18 +567,18 @@ def render_chat_interface(model, stage_name):
                     st.code(traceback.format_exc())
 
 def main():
-    """Main application"""
+    """Main application with enhanced RAG capabilities"""
     initialize_session_state()
     
     # Header
-    st.markdown('<p class="main-header">🤖 Data Science Agent</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">AI-powered data analysis and visualization</p>', unsafe_allow_html=True)
+    st.markdown('<p class="main-header">🤖 Data Science Agent with RAG</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">AI-powered analysis with intelligent context retrieval</p>', unsafe_allow_html=True)
     
     # Sidebar
     model, stage_name = render_sidebar()
     
     # Main content tabs
-    tab1, tab2 = st.tabs(["💬 Chat", "🎨 Artifacts"])
+    tab1, tab2, tab3 = st.tabs(["💬 Chat", "🎨 Artifacts", "🧠 RAG Explorer"])
     
     with tab1:
         render_chat_interface(model, stage_name)
@@ -450,6 +589,39 @@ def main():
             if st.button("🔄 Refresh", use_container_width=True, key="refresh_artifacts"):
                 st.rerun()
         render_artifacts_view(st.session_state.output_mgr, stage_name)
+    
+    with tab3:
+        st.markdown("### 🧠 RAG Context Explorer")
+        
+        if st.session_state.rag and st.session_state.rag.enabled:
+            # Query interface
+            query = st.text_input("Search RAG context:", placeholder="Enter a query to search stored context...")
+            
+            if query:
+                with st.spinner("Searching..."):
+                    contexts = st.session_state.rag.query_relevant_context(
+                        query=query,
+                        workflow_id=st.session_state.workflow_id,
+                        n_results=5
+                    )
+                    
+                    if contexts:
+                        st.success(f"Found {len(contexts)} relevant documents")
+                        for ctx in contexts:
+                            with st.expander(f"📄 {ctx['metadata'].get('type', 'document')}: {ctx['metadata'].get('stage_name', 'unknown')}"):
+                                st.markdown("**Content:**")
+                                st.text(ctx['document'][:500])
+                                st.markdown("**Metadata:**")
+                                st.json(ctx['metadata'])
+                    else:
+                        st.warning("No relevant context found")
+            
+            # RAG statistics
+            st.divider()
+            rag_stats = st.session_state.rag.get_stats()
+            st.json(rag_stats)
+        else:
+            st.error("RAG system is not enabled")
 
 if __name__ == "__main__":
     main()

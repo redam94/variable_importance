@@ -4,6 +4,8 @@ RAG System for Context Management
 Uses vector database (ChromaDB) to store and retrieve relevant context.
 Reduces token usage by retrieving only relevant information instead of 
 sending all outputs to the LLM.
+
+FIXED: ChromaDB query filters and metadata handling
 """
 
 import hashlib
@@ -79,6 +81,35 @@ class ContextRAG:
         hash_input = f"{doc_type}:{content}:{datetime.now().isoformat()}"
         return hashlib.md5(hash_input.encode()).hexdigest()
     
+    def _clean_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Clean metadata to ensure ChromaDB compatibility.
+        ChromaDB only accepts: str, int, float, bool, or None values.
+        """
+        cleaned = {}
+        for key, value in metadata.items():
+            if value is None:
+                cleaned[key] = None
+            elif isinstance(value, (str, int, float, bool)):
+                cleaned[key] = value
+            elif isinstance(value, list):
+                # Convert lists to comma-separated strings
+                if len(value) == 0:
+                    cleaned[key] = ""
+                elif all(isinstance(v, str) for v in value):
+                    cleaned[key] = ", ".join(value)
+                else:
+                    cleaned[key] = str(value)
+            elif isinstance(value, dict):
+                # Convert dicts to JSON strings
+                import json
+                cleaned[key] = json.dumps(value)
+            else:
+                # Convert other types to strings
+                cleaned[key] = str(value)
+        
+        return cleaned
+    
     def add_plot_analysis(
         self,
         plot_name: str,
@@ -106,16 +137,22 @@ class ContextRAG:
             # Create document text
             doc_text = f"Plot: {plot_name}\nAnalysis: {analysis}"
             
-            # Prepare metadata
+            # Prepare metadata and clean it
             doc_metadata = {
                 "type": "plot_analysis",
                 "plot_name": plot_name,
                 "plot_path": plot_path,
                 "stage_name": stage_name,
                 "workflow_id": workflow_id,
-                "timestamp": datetime.now().isoformat(),
-                **(metadata or {})
+                "timestamp": datetime.now().isoformat()
             }
+            
+            # Add additional metadata if provided
+            if metadata:
+                doc_metadata.update(metadata)
+            
+            # Clean metadata for ChromaDB
+            doc_metadata = self._clean_metadata(doc_metadata)
             
             # Generate unique ID
             doc_id = self._generate_id(doc_text, "plot_analysis")
@@ -178,9 +215,15 @@ Status: {'Success' if success else 'Failed'}
                 "has_error": bool(stderr),
                 "timestamp": datetime.now().isoformat(),
                 "code_length": len(code),
-                "output_length": len(stdout),
-                **(metadata or {})
+                "output_length": len(stdout)
             }
+            
+            # Add additional metadata if provided
+            if metadata:
+                doc_metadata.update(metadata)
+            
+            # Clean metadata for ChromaDB
+            doc_metadata = self._clean_metadata(doc_metadata)
             
             # Generate unique ID
             doc_id = self._generate_id(doc_text, "code_execution")
@@ -223,9 +266,15 @@ Status: {'Success' if success else 'Failed'}
                 "type": "summary",
                 "stage_name": stage_name,
                 "workflow_id": workflow_id,
-                "timestamp": datetime.now().isoformat(),
-                **(metadata or {})
+                "timestamp": datetime.now().isoformat()
             }
+            
+            # Add additional metadata if provided
+            if metadata:
+                doc_metadata.update(metadata)
+            
+            # Clean metadata for ChromaDB
+            doc_metadata = self._clean_metadata(doc_metadata)
             
             doc_id = self._generate_id(doc_text, "summary")
             
@@ -265,20 +314,37 @@ Status: {'Success' if success else 'Failed'}
             return []
         
         try:
-            # Build where filter
-            where_filter = {}
-            if workflow_id:
-                where_filter["workflow_id"] = workflow_id
-            if stage_name:
-                where_filter["stage_name"] = stage_name
-            if doc_types:
-                where_filter["type"] = {"$in": doc_types}
+            # Build where filter - ChromaDB requires specific structure
+            where_filter = None
+            
+            # Build compound filter if needed
+            if workflow_id and doc_types:
+                # Use $and for multiple conditions
+                where_filter = {
+                    "$and": [
+                        {"workflow_id": workflow_id},
+                        {"type": {"$in": doc_types}}
+                    ]
+                }
+            elif workflow_id and stage_name:
+                where_filter = {
+                    "$and": [
+                        {"workflow_id": workflow_id},
+                        {"stage_name": stage_name}
+                    ]
+                }
+            elif workflow_id:
+                where_filter = {"workflow_id": workflow_id}
+            elif stage_name:
+                where_filter = {"stage_name": stage_name}
+            elif doc_types:
+                where_filter = {"type": {"$in": doc_types}}
             
             # Query the collection
             results = self.collection.query(
                 query_texts=[query],
                 n_results=n_results,
-                where=where_filter if where_filter else None
+                where=where_filter
             )
             
             # Format results
@@ -383,9 +449,15 @@ Status: {'Success' if success else 'Failed'}
             return
         
         try:
-            where_filter = {"stage_name": stage_name}
             if workflow_id:
-                where_filter["workflow_id"] = workflow_id
+                where_filter = {
+                    "$and": [
+                        {"workflow_id": workflow_id},
+                        {"stage_name": stage_name}
+                    ]
+                }
+            else:
+                where_filter = {"stage_name": stage_name}
             
             results = self.collection.get(where=where_filter)
             
@@ -482,17 +554,22 @@ def test_rag():
         )
         print("✅ Plot analysis added")
         
-        # Test 2: Add code execution
-        print("\n2. Testing add code execution...")
+        # Test 2: Add code execution with list metadata (should be handled)
+        print("\n2. Testing add code execution with list metadata...")
         rag.add_code_execution(
             code="import pandas as pd\ndf = pd.read_csv('data.csv')",
             stdout="Loaded 1000 rows, 5 columns",
             stderr="",
             stage_name="data_loading",
             workflow_id=workflow_id,
-            success=True
+            success=True,
+            metadata={
+                "generated_files": ["file1.csv", "file2.png"],  # List - will be converted
+                "empty_list": [],  # Empty list - will be converted to empty string
+                "nested_dict": {"key": "value"}  # Dict - will be converted to JSON string
+            }
         )
-        print("✅ Code execution added")
+        print("✅ Code execution added with complex metadata")
         
         # Test 3: Add summary
         print("\n3. Testing add summary...")
@@ -503,17 +580,18 @@ def test_rag():
         )
         print("✅ Summary added")
         
-        # Test 4: Query relevant context
-        print("\n4. Testing query...")
+        # Test 4: Query with compound filter
+        print("\n4. Testing query with compound filter...")
         contexts = rag.query_relevant_context(
-            query="What does the scatter plot show?",
+            query="What does the data show?",
             workflow_id=workflow_id,
+            doc_types=["summary", "plot_analysis"],
             n_results=3
         )
         assert len(contexts) > 0, "Should find relevant contexts"
         print(f"   Found {len(contexts)} relevant contexts")
         print(f"   Top result: {contexts[0]['document'][:100]}...")
-        print("✅ Query works")
+        print("✅ Query with compound filter works")
         
         # Test 5: Get context summary
         print("\n5. Testing context summary...")
