@@ -10,6 +10,7 @@ import asyncio
 from model import code_workflow, OutputCapturingExecutor, OutputManager
 from plot_analysis_cache import PlotAnalysisCache
 from context_rag import ContextRAG
+from session_persistence import SessionPersistence, save_streamlit_session, load_streamlit_session
 
 # Page configuration
 st.set_page_config(
@@ -69,6 +70,13 @@ st.markdown("""
     .rag-disabled {
         background-color: #ffebee;
     }
+    .session-restored {
+        background-color: #e3f2fd;
+        padding: 0.5rem;
+        border-radius: 0.25rem;
+        margin-bottom: 1rem;
+        font-size: 0.9rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -84,7 +92,40 @@ def fetch_models():
     return ["gpt-oss:20b"]  # Default fallback
 
 def initialize_session_state():
-    """Initialize all session state variables including RAG and caching"""
+    """
+    Initialize all session state variables including RAG and caching.
+    ENHANCED: Now loads from persistence first!
+    """
+    # Mark that we're initializing
+    if "initialized" not in st.session_state:
+        st.session_state.initialized = False
+    
+    # Try to restore from saved session first (only on first run)
+    if not st.session_state.initialized:
+        restored = load_streamlit_session(st.session_state)
+        if restored:
+            st.session_state.session_restored = True
+            st.session_state.initialized = True
+            
+            # Recreate objects that weren't persisted
+            if "executor" not in st.session_state:
+                st.session_state.executor = OutputCapturingExecutor()
+            if "plot_cache" not in st.session_state:
+                st.session_state.plot_cache = PlotAnalysisCache()
+            
+            # Recreate output_mgr and rag based on workflow_id
+            if "workflow_id" in st.session_state:
+                if "output_mgr" not in st.session_state or st.session_state.output_mgr is None:
+                    st.session_state.output_mgr = OutputManager(workflow_id=st.session_state.workflow_id)
+                if "rag" not in st.session_state or st.session_state.rag is None:
+                    st.session_state.rag = ContextRAG(
+                        collection_name=st.session_state.workflow_id,
+                        persist_directory="cache/rag_db"
+                    )
+            
+            return
+    
+    # Initialize defaults if not restored
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "executor" not in st.session_state:
@@ -97,6 +138,8 @@ def initialize_session_state():
         st.session_state.uploaded_file_name = None
     if "workflow_id" not in st.session_state:
         st.session_state.workflow_id = "analysis_workflow"
+    if "session_restored" not in st.session_state:
+        st.session_state.session_restored = False
     
     # Initialize RAG and caching systems
     if "plot_cache" not in st.session_state:
@@ -108,6 +151,15 @@ def initialize_session_state():
         )
     if "rag_enabled" not in st.session_state:
         st.session_state.rag_enabled = True
+    
+    st.session_state.initialized = True
+
+def save_session_state():
+    """
+    Save current session state to disk.
+    Call this after significant state changes.
+    """
+    save_streamlit_session(st.session_state)
 
 def render_sidebar():
     """Render sidebar with configuration options including RAG controls"""
@@ -116,12 +168,19 @@ def render_sidebar():
         
         # Model selection
         models = fetch_models()
+        current_model = st.session_state.get("selected_model", models[0])
         model = st.selectbox(
             "🤖 Model",
             options=models,
-            index=0,
-            help="Select the LLM model to use"
+            index=models.index(current_model) if current_model in models else 0,
+            help="Select the LLM model to use",
+            key="model_selector"
         )
+        
+        # Save model selection
+        if model != st.session_state.get("selected_model"):
+            st.session_state.selected_model = model
+            save_session_state()
         
         st.divider()
         
@@ -130,14 +189,21 @@ def render_sidebar():
         work_id = st.text_input(
             "Workflow ID",
             value=st.session_state.workflow_id,
-            help="Unique identifier for this workflow. RAG context is isolated per workflow."
+            help="Unique identifier for this workflow. RAG context is isolated per workflow.",
+            key="workflow_id_input"
         )
         
         stage_name = st.text_input(
             "Stage Name",
-            value="analysis",
-            help="Name of the current analysis stage"
+            value=st.session_state.get("stage_name", "analysis"),
+            help="Name of the current analysis stage",
+            key="stage_name_input"
         )
+        
+        # Save stage name
+        if stage_name != st.session_state.get("stage_name"):
+            st.session_state.stage_name = stage_name
+            save_session_state()
         
         # Initialize/update workflow components
         if work_id and work_id != st.session_state.workflow_id:
@@ -149,10 +215,12 @@ def render_sidebar():
                 collection_name=work_id,
                 persist_directory="cache/rag_db"
             )
+            save_session_state()
             st.success(f"✅ Workflow initialized: `{work_id}`")
             
         elif st.session_state.output_mgr is None:
             st.session_state.output_mgr = OutputManager(workflow_id=work_id)
+            save_session_state()
         
         st.divider()
         
@@ -188,12 +256,14 @@ def render_sidebar():
             if st.button("🔄 Clear RAG", use_container_width=True, help="Clear all RAG documents for this workflow"):
                 if st.session_state.rag:
                     st.session_state.rag.delete_by_workflow(st.session_state.workflow_id)
+                    save_session_state()
                     st.success("RAG cleared!")
                     st.rerun()
         
         with col2:
             if st.button("🗑️ Clear Cache", use_container_width=True, help="Clear plot analysis cache"):
                 st.session_state.plot_cache.clear()
+                save_session_state()
                 st.success("Cache cleared!")
                 st.rerun()
         
@@ -204,7 +274,8 @@ def render_sidebar():
         uploaded_file = st.file_uploader(
             "Upload CSV file",
             type=["csv"],
-            help="Upload a CSV file for analysis"
+            help="Upload a CSV file for analysis",
+            key="_file_uploader"
         )
         
         if uploaded_file is not None:
@@ -217,13 +288,15 @@ def render_sidebar():
                     temp_file.write(uploaded_file.getvalue())
                     st.session_state.temp_file_path = temp_file.name
                     st.session_state.uploaded_file_name = uploaded_file.name
+                    st.session_state.uploaded_file_size = uploaded_file.size
+                    save_session_state()
             
             # Display file info
             st.markdown(f"""
             <div class="file-info">
-                <strong>📄 {uploaded_file.name}</strong><br>
+                <strong>📄 {st.session_state.uploaded_file_name}</strong><br>
                 <span style="font-size: 0.9rem; color: #666;">
-                    Size: {uploaded_file.size / 1024:.2f} KB
+                    Size: {st.session_state.uploaded_file_size / 1024:.2f} KB
                 </span>
             </div>
             """, unsafe_allow_html=True)
@@ -236,9 +309,25 @@ def render_sidebar():
         with col1:
             if st.button("🗑️ Clear Chat", use_container_width=True):
                 st.session_state.messages = []
+                save_session_state()
                 st.rerun()
         with col2:
             if st.button("🔄 Refresh", use_container_width=True):
+                st.rerun()
+        
+        # Session management
+        col3, col4 = st.columns(2)
+        with col3:
+            if st.button("💾 Save Session", use_container_width=True, help="Manually save current session"):
+                save_session_state()
+                st.success("Session saved!")
+        with col4:
+            if st.button("🔄 New Session", use_container_width=True, help="Start a new session"):
+                # Clear session state
+                for key in list(st.session_state.keys()):
+                    if key == '_file_uploader':
+                        continue
+                    del st.session_state[key]
                 st.rerun()
         
         # Statistics
@@ -370,7 +459,7 @@ def render_artifacts_view(output_mgr, stage_name):
                                     data=f,
                                     file_name=plot_file.name,
                                     mime="image/png",
-                                    key=f"download_{plot_file.stem}_{idx}"
+                                    key=f"download_{stage_display_name}_{plot_file.stem}_{idx}"
                                 )
                 else:
                     st.info("No plots generated")
@@ -392,7 +481,7 @@ def render_artifacts_view(output_mgr, stage_name):
                                     label="⬇️ Download",
                                     data=f,
                                     file_name=data_file.name,
-                                    key=f"download_data_{data_file.stem}"
+                                    key=f"download_data_{stage_display_name}_{data_file.stem}"
                                 )
             
             # Code
@@ -408,7 +497,7 @@ def render_artifacts_view(output_mgr, stage_name):
                                 label="⬇️ Download Code",
                                 data=code_content,
                                 file_name=code_file.name,
-                                key=f"download_code_{code_file.stem}"
+                                key=f"download_code_{stage_display_name}_{code_file.stem}"
                             )
             
             # Console output
@@ -488,6 +577,16 @@ def render_rag_insights():
 def render_chat_interface(model, stage_name):
     """Render the main chat interface with RAG awareness"""
     
+    # Show session restored message
+    if st.session_state.get("session_restored", False):
+        st.markdown(f"""
+        <div class="session-restored">
+            ✅ Session restored! Your chat history and settings have been recovered.
+        </div>
+        """, unsafe_allow_html=True)
+        # Clear the flag after showing once
+        st.session_state.session_restored = False
+    
     # Show RAG insights at the top
     render_rag_insights()
     
@@ -499,6 +598,8 @@ def render_chat_interface(model, stage_name):
     if prompt := st.chat_input("Ask me anything about your data..."):
         # Display user message
         st.session_state.messages.append(HumanMessage(content=prompt))
+        save_session_state()  # Save after adding message
+        
         with st.chat_message("user", avatar="👤"):
             st.markdown(prompt)
         
@@ -553,6 +654,9 @@ def render_chat_interface(model, stage_name):
                     st.markdown(summary)
                 st.session_state.messages.append(AIMessage(content=summary))
                 
+                # Save session after all responses
+                save_session_state()
+                
                 # Show success message with appropriate context
                 if response.get('can_answer_from_rag'):
                     st.info("✅ Answered using existing context from RAG (no code execution needed)")
@@ -567,12 +671,12 @@ def render_chat_interface(model, stage_name):
                     st.code(traceback.format_exc())
 
 def main():
-    """Main application with enhanced RAG capabilities"""
+    """Main application with enhanced RAG capabilities and session persistence"""
     initialize_session_state()
     
     # Header
     st.markdown('<p class="main-header">🤖 Data Science Agent with RAG</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">AI-powered analysis with intelligent context retrieval</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">AI-powered analysis with intelligent context retrieval and persistent sessions</p>', unsafe_allow_html=True)
     
     # Sidebar
     model, stage_name = render_sidebar()
@@ -586,7 +690,7 @@ def main():
     with tab2:
         col1, col2 = st.columns([4, 1])
         with col2:
-            if st.button("🔄 Refresh", use_container_width=True, key="refresh_artifacts"):
+            if st.button("🔄 Refresh", use_container_width=True, key="_refresh_artifacts"):
                 st.rerun()
         render_artifacts_view(st.session_state.output_mgr, stage_name)
     
