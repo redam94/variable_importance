@@ -289,7 +289,7 @@ os.chdir('{working_dir}')
         logger.info("📦 Saving outputs...")
         
         # 1. Save the code
-        output_manager.save_code(stage_name, code, code_filename, stage_order)
+        output_manager.save_code(stage_name, code, f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{code_filename}", stage_order)
         
         # 2. Save console output
         output_manager.save_console_output(

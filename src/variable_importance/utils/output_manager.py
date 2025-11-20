@@ -171,7 +171,7 @@ class OutputManager:
             Path to saved console output file
         """
         stage_dir = self.get_stage_dir(stage_name, stage_order)
-        console_file = stage_dir / "console_output.txt"
+        console_file = stage_dir / f"console_output_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
         with open(console_file, 'w') as f:
             f.write("=" * 80 + "\n")
