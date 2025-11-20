@@ -7,7 +7,9 @@ import httpx
 import tempfile
 import os
 import asyncio
-from model import code_workflow, OutputCapturingExecutor, OutputManager
+from model import code_workflow
+from variable_importance.utils.code_executer import OutputCapturingExecutor 
+from variable_importance.utils.output_manager import OutputManager
 from plot_analysis_cache import PlotAnalysisCache
 from context_rag import ContextRAG
 from session_persistence import SessionPersistence, save_streamlit_session, load_streamlit_session
@@ -113,6 +115,8 @@ def initialize_session_state():
             if "plot_cache" not in st.session_state:
                 st.session_state.plot_cache = PlotAnalysisCache()
             
+            if "uploaded_file_size" not in st.session_state:
+                st.session_state.uploaded_file_size = 0
             # Recreate output_mgr and rag based on workflow_id
             if "workflow_id" in st.session_state:
                 if "output_mgr" not in st.session_state or st.session_state.output_mgr is None:
@@ -288,7 +292,7 @@ def render_sidebar():
                     temp_file.write(uploaded_file.getvalue())
                     st.session_state.temp_file_path = temp_file.name
                     st.session_state.uploaded_file_name = uploaded_file.name
-                    st.session_state.uploaded_file_size = uploaded_file.size
+                    
                     save_session_state()
             
             # Display file info
@@ -296,7 +300,7 @@ def render_sidebar():
             <div class="file-info">
                 <strong>📄 {st.session_state.uploaded_file_name}</strong><br>
                 <span style="font-size: 0.9rem; color: #666;">
-                    Size: {st.session_state.uploaded_file_size / 1024:.2f} KB
+                    Size: {uploaded_file.size/ 1024:.2f} KB
                 </span>
             </div>
             """, unsafe_allow_html=True)
@@ -459,7 +463,7 @@ def render_artifacts_view(output_mgr, stage_name):
                                     data=f,
                                     file_name=plot_file.name,
                                     mime="image/png",
-                                    key=f"download_{stage_display_name}_{plot_file.stem}_{idx}"
+                                    key=f"_download_{stage_display_name}_{plot_file.stem}_{idx}"
                                 )
                 else:
                     st.info("No plots generated")
@@ -481,7 +485,7 @@ def render_artifacts_view(output_mgr, stage_name):
                                     label="⬇️ Download",
                                     data=f,
                                     file_name=data_file.name,
-                                    key=f"download_data_{stage_display_name}_{data_file.stem}"
+                                    key=f"_download_data_{stage_display_name}_{data_file.stem}"
                                 )
             
             # Code
@@ -497,15 +501,17 @@ def render_artifacts_view(output_mgr, stage_name):
                                 label="⬇️ Download Code",
                                 data=code_content,
                                 file_name=code_file.name,
-                                key=f"download_code_{stage_display_name}_{code_file.stem}"
+                                key=f"_download_code_{stage_display_name}_{code_file.stem}"
                             )
             
             # Console output
-            console_file = stage_dir / "console_output.txt"
-            if console_file.exists():
-                with st.expander("💻 Console Output"):
-                    with open(console_file, 'r') as f:
-                        st.text(f.read())
+            console_files = sorted(list(stage_dir.glob("console_output_*.txt")))
+            if console_files:
+                for file_idx, console_file in enumerate(console_files):
+                    
+                    with st.expander(f"💻 {console_file.stem.title()}"):
+                        with open(console_file, 'r') as f:
+                            st.text(f.read())
             
             # Execution info
             exec_info_file = stage_dir / "execution_info.json"

@@ -1,14 +1,15 @@
 """
-RAG System for Context Management
+Enhanced RAG System with Text Chunking
 
-Uses vector database (ChromaDB) to store and retrieve relevant context.
-Reduces token usage by retrieving only relevant information instead of 
-sending all outputs to the LLM.
-
-FIXED: ChromaDB query filters and metadata handling
+Features:
+- Intelligent text chunking for focused context
+- Sentence-aware segmentation
+- Overlap between chunks to prevent information loss
+- Better context retrieval for code generation
 """
 
 import hashlib
+import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -23,21 +24,123 @@ except ImportError:
     logger.warning("⚠️ ChromaDB not available. Install with: pip install chromadb")
 
 
+class TextChunker:
+    """
+    Intelligent text chunking for RAG system.
+    
+    Splits text into smaller, focused segments while preserving context.
+    """
+    
+    def __init__(self, chunk_size: int = 500, overlap: int = 50):
+        """
+        Initialize text chunker.
+        
+        Args:
+            chunk_size: Target size for each chunk (in characters)
+            overlap: Number of characters to overlap between chunks
+        """
+        self.chunk_size = chunk_size
+        self.overlap = overlap
+        logger.info(f"📝 TextChunker initialized (chunk_size={chunk_size}, overlap={overlap})")
+    
+    def chunk_text(self, text: str, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """
+        Chunk text into smaller, focused segments.
+        
+        Args:
+            text: Text to chunk
+            metadata: Base metadata to attach to all chunks
+            
+        Returns:
+            List of chunk dictionaries with text and metadata
+        """
+        if not text:
+            return []
+        
+        # Small text - no chunking needed
+        if len(text) <= self.chunk_size:
+            return [{
+                "text": text,
+                "metadata": {
+                    **(metadata or {}),
+                    "chunk_index": 0,
+                    "total_chunks": 1,
+                    "chunk_size": len(text)
+                }
+            }]
+        
+        # Split into sentences (preserve sentence boundaries)
+        sentences = re.split(r'(?<=[.!?\n])\s+', text)
+        
+        chunks = []
+        current_chunk = []
+        current_size = 0
+        
+        for sentence in sentences:
+            sentence_size = len(sentence)
+            
+            # Start new chunk if adding sentence exceeds size
+            if current_size + sentence_size > self.chunk_size and current_chunk:
+                chunk_text = " ".join(current_chunk)
+                chunks.append(chunk_text)
+                
+                # Keep overlap from previous chunk
+                if self.overlap > 0 and len(chunk_text) > self.overlap:
+                    overlap_text = chunk_text[-self.overlap:]
+                    # Find sentence boundary in overlap
+                    last_period = overlap_text.rfind('. ')
+                    if last_period != -1:
+                        overlap_text = overlap_text[last_period + 2:]
+                    
+                    current_chunk = [overlap_text]
+                    current_size = len(overlap_text)
+                else:
+                    current_chunk = []
+                    current_size = 0
+            
+            current_chunk.append(sentence)
+            current_size += sentence_size + 1  # +1 for space
+        
+        # Add final chunk
+        if current_chunk:
+            chunks.append(" ".join(current_chunk))
+        
+        # Create chunk dictionaries with metadata
+        total_chunks = len(chunks)
+        result = []
+        
+        for idx, chunk_text in enumerate(chunks):
+            chunk_metadata = {
+                **(metadata or {}),
+                "chunk_index": idx,
+                "total_chunks": total_chunks,
+                "chunk_size": len(chunk_text)
+            }
+            result.append({
+                "text": chunk_text,
+                "metadata": chunk_metadata
+            })
+        
+        logger.debug(f"📝 Chunked text into {total_chunks} segments")
+        return result
+
+
 class ContextRAG:
     """
-    RAG system for managing workflow context.
+    Enhanced RAG system with chunking for better context retrieval.
     
     Features:
-    - Stores plot analyses, code outputs, and execution results
-    - Retrieves only relevant context based on user query
-    - Reduces token usage by filtering irrelevant information
-    - Maintains semantic search capabilities
+    - Stores chunks instead of full documents
+    - Better semantic search granularity
+    - Focused context for LLM queries
     """
     
     def __init__(
         self,
         collection_name: str = "workflow_context",
-        persist_directory: str = "cache/rag_db"
+        persist_directory: str = "cache/rag_db",
+        chunk_size: int = 500,
+        chunk_overlap: int = 50
     ):
         """
         Initialize the RAG system.
@@ -45,6 +148,8 @@ class ContextRAG:
         Args:
             collection_name: Name of the ChromaDB collection
             persist_directory: Directory to persist the database
+            chunk_size: Size of text chunks
+            chunk_overlap: Overlap between chunks
         """
         if not CHROMADB_AVAILABLE:
             logger.error("❌ ChromaDB not available. RAG system disabled.")
@@ -54,6 +159,9 @@ class ContextRAG:
         self.enabled = True
         self.persist_directory = Path(persist_directory).resolve()
         self.persist_directory.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize chunker
+        self.chunker = TextChunker(chunk_size=chunk_size, overlap=chunk_overlap)
         
         # Initialize ChromaDB client
         self.client = chromadb.PersistentClient(
@@ -76,14 +184,14 @@ class ContextRAG:
             logger.error(f"❌ Failed to initialize collection: {e}")
             self.enabled = False
     
-    def _generate_id(self, content: str, doc_type: str) -> str:
-        """Generate a unique ID for a document."""
-        hash_input = f"{doc_type}:{content}:{datetime.now().isoformat()}"
+    def _generate_id(self, content: str, doc_type: str, chunk_idx: int = 0) -> str:
+        """Generate a unique ID for a chunk."""
+        hash_input = f"{doc_type}:{content[:100]}:{chunk_idx}:{datetime.now().isoformat()}"
         return hashlib.md5(hash_input.encode()).hexdigest()
     
     def _clean_metadata(self, metadata: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Clean metadata to ensure ChromaDB compatibility.
+        Clean metadata for ChromaDB compatibility.
         ChromaDB only accepts: str, int, float, bool, or None values.
         """
         cleaned = {}
@@ -93,7 +201,6 @@ class ContextRAG:
             elif isinstance(value, (str, int, float, bool)):
                 cleaned[key] = value
             elif isinstance(value, list):
-                # Convert lists to comma-separated strings
                 if len(value) == 0:
                     cleaned[key] = ""
                 elif all(isinstance(v, str) for v in value):
@@ -101,11 +208,9 @@ class ContextRAG:
                 else:
                     cleaned[key] = str(value)
             elif isinstance(value, dict):
-                # Convert dicts to JSON strings
                 import json
                 cleaned[key] = json.dumps(value)
             else:
-                # Convert other types to strings
                 cleaned[key] = str(value)
         
         return cleaned
@@ -120,7 +225,7 @@ class ContextRAG:
         metadata: Optional[Dict[str, Any]] = None
     ):
         """
-        Add a plot analysis to the RAG system.
+        Add a plot analysis to the RAG system with chunking.
         
         Args:
             plot_name: Name of the plot file
@@ -134,11 +239,8 @@ class ContextRAG:
             return
         
         try:
-            # Create document text
-            doc_text = f"Plot: {plot_name}\nAnalysis: {analysis}"
-            
-            # Prepare metadata and clean it
-            doc_metadata = {
+            # Prepare base metadata
+            base_metadata = {
                 "type": "plot_analysis",
                 "plot_name": plot_name,
                 "plot_path": plot_path,
@@ -147,24 +249,34 @@ class ContextRAG:
                 "timestamp": datetime.now().isoformat()
             }
             
-            # Add additional metadata if provided
             if metadata:
-                doc_metadata.update(metadata)
+                base_metadata.update(metadata)
             
-            # Clean metadata for ChromaDB
-            doc_metadata = self._clean_metadata(doc_metadata)
+            # Chunk the analysis
+            doc_text = f"Plot: {plot_name}\n\nAnalysis:\n{analysis}"
+            chunks = self.chunker.chunk_text(doc_text, base_metadata)
             
-            # Generate unique ID
-            doc_id = self._generate_id(doc_text, "plot_analysis")
+            # Add all chunks to collection
+            documents = []
+            metadatas = []
+            ids = []
             
-            # Add to collection
+            for chunk in chunks:
+                chunk_text = chunk["text"]
+                chunk_metadata = self._clean_metadata(chunk["metadata"])
+                chunk_id = self._generate_id(chunk_text, "plot_analysis", chunk["metadata"]["chunk_index"])
+                
+                documents.append(chunk_text)
+                metadatas.append(chunk_metadata)
+                ids.append(chunk_id)
+            
             self.collection.add(
-                documents=[doc_text],
-                metadatas=[doc_metadata],
-                ids=[doc_id]
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
             )
             
-            logger.info(f"📊 Added plot analysis to RAG: {plot_name}")
+            logger.info(f"📊 Added plot analysis to RAG: {plot_name} ({len(chunks)} chunks)")
             
         except Exception as e:
             logger.error(f"❌ Failed to add plot analysis: {e}")
@@ -180,7 +292,7 @@ class ContextRAG:
         metadata: Optional[Dict[str, Any]] = None
     ):
         """
-        Add code execution results to the RAG system.
+        Add code execution results to RAG with chunking.
         
         Args:
             code: Executed code
@@ -195,19 +307,8 @@ class ContextRAG:
             return
         
         try:
-            # Create document text (truncate if too long)
-            code_snippet = code[:500] + "..." if len(code) > 500 else code
-            stdout_snippet = stdout[:500] + "..." if len(stdout) > 500 else stdout
-            
-            doc_text = f"""
-Stage: {stage_name}
-Code: {code_snippet}
-Output: {stdout_snippet}
-Status: {'Success' if success else 'Failed'}
-"""
-            
-            # Prepare metadata
-            doc_metadata = {
+            # Prepare base metadata
+            base_metadata = {
                 "type": "code_execution",
                 "stage_name": stage_name,
                 "workflow_id": workflow_id,
@@ -218,24 +319,48 @@ Status: {'Success' if success else 'Failed'}
                 "output_length": len(stdout)
             }
             
-            # Add additional metadata if provided
             if metadata:
-                doc_metadata.update(metadata)
+                base_metadata.update(metadata)
             
-            # Clean metadata for ChromaDB
-            doc_metadata = self._clean_metadata(doc_metadata)
+            # Create document text
+            doc_text = f"""
+Stage: {stage_name}
+Status: {'Success' if success else 'Failed'}
+
+Code:
+{code}
+
+Output:
+{stdout}
+"""
             
-            # Generate unique ID
-            doc_id = self._generate_id(doc_text, "code_execution")
+            if stderr:
+                doc_text += f"\nErrors:\n{stderr}"
             
-            # Add to collection
+            # Chunk the document
+            chunks = self.chunker.chunk_text(doc_text, base_metadata)
+            
+            # Add all chunks
+            documents = []
+            metadatas = []
+            ids = []
+            
+            for chunk in chunks:
+                chunk_text = chunk["text"]
+                chunk_metadata = self._clean_metadata(chunk["metadata"])
+                chunk_id = self._generate_id(chunk_text, "code_execution", chunk["metadata"]["chunk_index"])
+                
+                documents.append(chunk_text)
+                metadatas.append(chunk_metadata)
+                ids.append(chunk_id)
+            
             self.collection.add(
-                documents=[doc_text],
-                metadatas=[doc_metadata],
-                ids=[doc_id]
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
             )
             
-            logger.info(f"💻 Added code execution to RAG: {stage_name}")
+            logger.info(f"💻 Added code execution to RAG: {stage_name} ({len(chunks)} chunks)")
             
         except Exception as e:
             logger.error(f"❌ Failed to add code execution: {e}")
@@ -247,44 +372,44 @@ Status: {'Success' if success else 'Failed'}
         workflow_id: str,
         metadata: Optional[Dict[str, Any]] = None
     ):
-        """
-        Add a summary to the RAG system.
-        
-        Args:
-            summary: Summary text
-            stage_name: Workflow stage name
-            workflow_id: Workflow ID
-            metadata: Additional metadata
-        """
+        """Add a summary to RAG with chunking."""
         if not self.enabled:
             return
         
         try:
-            doc_text = f"Summary for {stage_name}:\n{summary}"
-            
-            doc_metadata = {
+            base_metadata = {
                 "type": "summary",
                 "stage_name": stage_name,
                 "workflow_id": workflow_id,
                 "timestamp": datetime.now().isoformat()
             }
             
-            # Add additional metadata if provided
             if metadata:
-                doc_metadata.update(metadata)
+                base_metadata.update(metadata)
             
-            # Clean metadata for ChromaDB
-            doc_metadata = self._clean_metadata(doc_metadata)
+            doc_text = f"Summary for {stage_name}:\n{summary}"
+            chunks = self.chunker.chunk_text(doc_text, base_metadata)
             
-            doc_id = self._generate_id(doc_text, "summary")
+            documents = []
+            metadatas = []
+            ids = []
+            
+            for chunk in chunks:
+                chunk_text = chunk["text"]
+                chunk_metadata = self._clean_metadata(chunk["metadata"])
+                chunk_id = self._generate_id(chunk_text, "summary", chunk["metadata"]["chunk_index"])
+                
+                documents.append(chunk_text)
+                metadatas.append(chunk_metadata)
+                ids.append(chunk_id)
             
             self.collection.add(
-                documents=[doc_text],
-                metadatas=[doc_metadata],
-                ids=[doc_id]
+                documents=documents,
+                metadatas=metadatas,
+                ids=ids
             )
             
-            logger.info(f"📝 Added summary to RAG: {stage_name}")
+            logger.info(f"📝 Added summary to RAG: {stage_name} ({len(chunks)} chunks)")
             
         except Exception as e:
             logger.error(f"❌ Failed to add summary: {e}")
@@ -295,31 +420,29 @@ Status: {'Success' if success else 'Failed'}
         workflow_id: Optional[str] = None,
         stage_name: Optional[str] = None,
         doc_types: Optional[List[str]] = None,
-        n_results: int = 5
+        n_results: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Query for relevant context based on user query.
+        Query for relevant context chunks.
         
         Args:
             query: User query text
             workflow_id: Filter by workflow ID
             stage_name: Filter by stage name
-            doc_types: Filter by document types (e.g., ["plot_analysis", "summary"])
+            doc_types: Filter by document types
             n_results: Number of results to retrieve
             
         Returns:
-            List of relevant context documents with metadata
+            List of relevant context chunks with metadata
         """
         if not self.enabled:
             return []
         
         try:
-            # Build where filter - ChromaDB requires specific structure
+            # Build where filter
             where_filter = None
             
-            # Build compound filter if needed
             if workflow_id and doc_types:
-                # Use $and for multiple conditions
                 where_filter = {
                     "$and": [
                         {"workflow_id": workflow_id},
@@ -347,11 +470,11 @@ Status: {'Success' if success else 'Failed'}
                 where=where_filter
             )
             
-            # Format results
             if not results['documents'] or not results['documents'][0]:
                 logger.info(f"🔍 No relevant context found for query")
                 return []
             
+            # Format results
             contexts = []
             for i, doc in enumerate(results['documents'][0]):
                 context = {
@@ -361,7 +484,7 @@ Status: {'Success' if success else 'Failed'}
                 }
                 contexts.append(context)
             
-            logger.info(f"🔍 Retrieved {len(contexts)} relevant contexts")
+            logger.info(f"🔍 Retrieved {len(contexts)} relevant context chunks")
             return contexts
             
         except Exception as e:
@@ -378,14 +501,7 @@ Status: {'Success' if success else 'Failed'}
         """
         Get a concise context summary relevant to the query.
         
-        Args:
-            query: User query
-            workflow_id: Filter by workflow ID
-            stage_name: Filter by stage name
-            max_tokens: Maximum approximate tokens in summary
-            
-        Returns:
-            Formatted context string
+        Combines relevant chunks into a focused context string.
         """
         if not self.enabled:
             return ""
@@ -394,7 +510,7 @@ Status: {'Success' if success else 'Failed'}
             query=query,
             workflow_id=workflow_id,
             stage_name=stage_name,
-            n_results=10
+            n_results=15  # Get more chunks since they're smaller
         )
         
         if not contexts:
@@ -405,23 +521,44 @@ Status: {'Success' if success else 'Failed'}
         total_length = 0
         max_chars = max_tokens * 4  # Rough approximation
         
+        # Group chunks by document
+        doc_groups = {}
         for ctx in contexts:
             doc_type = ctx['metadata'].get('type', 'unknown')
-            doc_text = ctx['document']
+            stage = ctx['metadata'].get('stage_name', 'unknown')
+            chunk_idx = ctx['metadata'].get('chunk_index', 0)
             
-            # Truncate if needed
-            if total_length + len(doc_text) > max_chars:
-                remaining = max_chars - total_length
-                if remaining > 100:  # Only add if meaningful
-                    doc_text = doc_text[:remaining] + "..."
-                else:
+            key = f"{doc_type}:{stage}"
+            if key not in doc_groups:
+                doc_groups[key] = []
+            doc_groups[key].append((chunk_idx, ctx))
+        
+        # Add grouped chunks to context
+        for key, chunks in doc_groups.items():
+            # Sort chunks by index
+            chunks.sort(key=lambda x: x[0])
+            
+            doc_type, stage = key.split(':', 1)
+            context_parts.append(f"\n[{doc_type.upper()} - {stage}]")
+            
+            for _, ctx in chunks:
+                doc_text = ctx['document']
+                
+                if total_length + len(doc_text) > max_chars:
+                    remaining = max_chars - total_length
+                    if remaining > 100:
+                        doc_text = doc_text[:remaining] + "..."
+                    else:
+                        break
+                
+                context_parts.append(doc_text)
+                total_length += len(doc_text)
+                
+                if total_length >= max_chars:
                     break
             
-            context_parts.append(f"[{doc_type.upper()}]")
-            context_parts.append(doc_text)
-            context_parts.append("")  # Blank line
-            
-            total_length += len(doc_text)
+            if total_length >= max_chars:
+                break
         
         return "\n".join(context_parts)
     
@@ -431,42 +568,16 @@ Status: {'Success' if success else 'Failed'}
             return
         
         try:
-            # Get all IDs for this workflow
             results = self.collection.get(
                 where={"workflow_id": workflow_id}
             )
             
             if results['ids']:
                 self.collection.delete(ids=results['ids'])
-                logger.info(f"🗑️ Deleted {len(results['ids'])} documents for workflow: {workflow_id}")
+                logger.info(f"🗑️ Deleted {len(results['ids'])} chunks for workflow: {workflow_id}")
         
         except Exception as e:
             logger.error(f"❌ Failed to delete workflow documents: {e}")
-    
-    def delete_by_stage(self, stage_name: str, workflow_id: Optional[str] = None):
-        """Delete all documents for a specific stage."""
-        if not self.enabled:
-            return
-        
-        try:
-            if workflow_id:
-                where_filter = {
-                    "$and": [
-                        {"workflow_id": workflow_id},
-                        {"stage_name": stage_name}
-                    ]
-                }
-            else:
-                where_filter = {"stage_name": stage_name}
-            
-            results = self.collection.get(where=where_filter)
-            
-            if results['ids']:
-                self.collection.delete(ids=results['ids'])
-                logger.info(f"🗑️ Deleted {len(results['ids'])} documents for stage: {stage_name}")
-        
-        except Exception as e:
-            logger.error(f"❌ Failed to delete stage documents: {e}")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get RAG system statistics."""
@@ -486,10 +597,12 @@ Status: {'Success' if success else 'Failed'}
             
             return {
                 "enabled": True,
-                "total_documents": total_count,
+                "total_chunks": total_count,
                 "type_breakdown": type_counts,
                 "persist_directory": str(self.persist_directory),
-                "collection_name": self.collection.name
+                "collection_name": self.collection.name,
+                "chunk_size": self.chunker.chunk_size,
+                "chunk_overlap": self.chunker.overlap
             }
         
         except Exception as e:
@@ -502,140 +615,50 @@ Status: {'Success' if success else 'Failed'}
             return
         
         try:
-            # Delete collection and recreate
             self.client.delete_collection(self.collection.name)
             self.collection = self.client.create_collection(
                 name=self.collection.name,
                 metadata={"hnsw:space": "cosine"}
             )
-            logger.info("🗑️ Cleared all RAG documents")
+            logger.info("🗑️ Cleared all RAG chunks")
         
         except Exception as e:
             logger.error(f"❌ Failed to clear RAG: {e}")
 
 
 # ============================================================================
-# STANDALONE TESTING
+# TESTING
 # ============================================================================
 
-def test_rag():
-    """Test the RAG system."""
-    import tempfile
-    import shutil
-    
+def test_chunking():
+    """Test text chunking functionality."""
     print("\n" + "="*70)
-    print("TESTING RAG SYSTEM")
+    print("TESTING TEXT CHUNKING")
     print("="*70)
     
-    if not CHROMADB_AVAILABLE:
-        print("❌ ChromaDB not available. Skipping tests.")
-        return
+    chunker = TextChunker(chunk_size=200, overlap=50)
     
-    # Create temporary directory
-    temp_dir = Path(tempfile.mkdtemp())
+    # Test text
+    text = """
+    This is the first sentence of our test document. This is the second sentence.
+    This is the third sentence that contains important information about data analysis.
+    The fourth sentence explains more about machine learning models.
+    Here's a fifth sentence about feature engineering. The sixth sentence discusses hyperparameters.
+    Finally, the seventh sentence wraps up our discussion about model evaluation metrics.
+    """
     
-    try:
-        # Initialize RAG
-        rag = ContextRAG(
-            collection_name="test_workflow",
-            persist_directory=str(temp_dir / "rag_db")
-        )
-        
-        workflow_id = "test_workflow_001"
-        
-        # Test 1: Add plot analysis
-        print("\n1. Testing add plot analysis...")
-        rag.add_plot_analysis(
-            plot_name="scatter_plot.png",
-            plot_path="/path/to/scatter_plot.png",
-            analysis="This scatter plot shows a strong positive correlation between variables X and Y.",
-            stage_name="eda",
-            workflow_id=workflow_id
-        )
-        print("✅ Plot analysis added")
-        
-        # Test 2: Add code execution with list metadata (should be handled)
-        print("\n2. Testing add code execution with list metadata...")
-        rag.add_code_execution(
-            code="import pandas as pd\ndf = pd.read_csv('data.csv')",
-            stdout="Loaded 1000 rows, 5 columns",
-            stderr="",
-            stage_name="data_loading",
-            workflow_id=workflow_id,
-            success=True,
-            metadata={
-                "generated_files": ["file1.csv", "file2.png"],  # List - will be converted
-                "empty_list": [],  # Empty list - will be converted to empty string
-                "nested_dict": {"key": "value"}  # Dict - will be converted to JSON string
-            }
-        )
-        print("✅ Code execution added with complex metadata")
-        
-        # Test 3: Add summary
-        print("\n3. Testing add summary...")
-        rag.add_summary(
-            summary="The data shows strong seasonality with peaks in summer months.",
-            stage_name="eda",
-            workflow_id=workflow_id
-        )
-        print("✅ Summary added")
-        
-        # Test 4: Query with compound filter
-        print("\n4. Testing query with compound filter...")
-        contexts = rag.query_relevant_context(
-            query="What does the data show?",
-            workflow_id=workflow_id,
-            doc_types=["summary", "plot_analysis"],
-            n_results=3
-        )
-        assert len(contexts) > 0, "Should find relevant contexts"
-        print(f"   Found {len(contexts)} relevant contexts")
-        print(f"   Top result: {contexts[0]['document'][:100]}...")
-        print("✅ Query with compound filter works")
-        
-        # Test 5: Get context summary
-        print("\n5. Testing context summary...")
-        summary = rag.get_context_summary(
-            query="correlation between variables",
-            workflow_id=workflow_id
-        )
-        assert len(summary) > 0, "Should generate summary"
-        print(f"   Summary length: {len(summary)} chars")
-        print("✅ Context summary works")
-        
-        # Test 6: Get statistics
-        print("\n6. Testing statistics...")
-        stats = rag.get_stats()
-        print(f"   Total documents: {stats['total_documents']}")
-        print(f"   Type breakdown: {stats['type_breakdown']}")
-        assert stats['total_documents'] == 3
-        print("✅ Statistics work")
-        
-        # Test 7: Persistence
-        print("\n7. Testing persistence...")
-        rag2 = ContextRAG(
-            collection_name="test_workflow",
-            persist_directory=str(temp_dir / "rag_db")
-        )
-        stats2 = rag2.get_stats()
-        assert stats2['total_documents'] == 3, "Should persist across instances"
-        print("✅ Persistence works")
-        
-        # Test 8: Delete by workflow
-        print("\n8. Testing deletion...")
-        rag.delete_by_workflow(workflow_id)
-        stats3 = rag.get_stats()
-        assert stats3['total_documents'] == 0
-        print("✅ Deletion works")
-        
-        print("\n" + "="*70)
-        print("ALL TESTS PASSED! ✅")
-        print("="*70)
-        
-    finally:
-        # Cleanup
-        shutil.rmtree(temp_dir)
+    chunks = chunker.chunk_text(text.strip(), metadata={"source": "test"})
+    
+    print(f"\nOriginal length: {len(text)} characters")
+    print(f"Number of chunks: {len(chunks)}")
+    
+    for i, chunk in enumerate(chunks):
+        print(f"\n--- Chunk {i+1} ---")
+        print(f"Size: {chunk['metadata']['chunk_size']} characters")
+        print(f"Text: {chunk['text'][:100]}...")
+    
+    print("\n✅ Chunking test complete!")
 
 
 if __name__ == "__main__":
-    test_rag()
+    test_chunking()
