@@ -13,6 +13,7 @@ from variable_importance.utils.output_manager import OutputManager
 from ai.memory.plot_analysis_cache import PlotAnalysisCache
 from ai.memory.context_rag import ContextRAG
 from session_persistence import SessionPersistence, save_streamlit_session, load_streamlit_session
+from datetime import datetime
 
 # Page configuration
 st.set_page_config(
@@ -676,8 +677,158 @@ def render_chat_interface(model, stage_name):
                 with st.expander("🔍 Debug Info"):
                     st.code(traceback.format_exc())
 
-def main():
-    """Main application with enhanced RAG capabilities and session persistence"""
+def render_chat_interface_nonblocking(model, stage_name):
+    """Enhanced chat interface with non-blocking processing"""
+    
+    # Create a container for status messages
+    status_container = st.container()
+    
+    # Create a container for chat messages
+    chat_container = st.container()
+    
+    # Display existing chat history in the chat container
+    with chat_container:
+        for message in st.session_state.messages:
+            render_chat_message(message)
+    
+    # Processing status area
+    if st.session_state.get("is_processing", False):
+        with status_container:
+            with st.status("Processing your request...", expanded=True) as status:
+                st.write("🔄 Checking RAG for existing context...")
+                progress_placeholder = st.empty()
+                
+                # Show what stage we're at
+                current_stage = st.session_state.get("processing_stage", "Starting...")
+                progress_placeholder.info(f"Current stage: {current_stage}")
+                
+                # Add a note that user can switch tabs
+                st.success("💡 You can switch to the Artifacts tab to view existing results while this processes!")
+    
+    # Chat input
+    prompt = st.chat_input(
+        "Ask me anything about your data...", 
+        disabled=st.session_state.get("is_processing", False)
+    )
+    
+    if prompt and not st.session_state.get("is_processing", False):
+        # Add user message
+        st.session_state.messages.append(HumanMessage(content=prompt))
+        
+        # Set processing flag
+        st.session_state.is_processing = True
+        st.session_state.processing_stage = "Initializing..."
+        st.session_state.current_prompt = prompt
+        
+        # Trigger rerun to start processing
+        st.rerun()
+    
+    # Process if we have a pending prompt
+    if st.session_state.get("is_processing", False) and st.session_state.get("current_prompt"):
+        prompt = st.session_state.current_prompt
+        
+        # Use empty containers to update status
+        with st.spinner("Processing..."):
+            try:
+                # Update processing stage
+                st.session_state.processing_stage = "Querying RAG system..."
+                
+                # Run the actual processing
+                response = asyncio.run(process_user_message_with_status_updates(
+                    prompt,
+                    st.session_state.temp_file_path,
+                    stage_name,
+                    st.session_state.output_mgr,
+                    st.session_state.executor,
+                    st.session_state.plot_cache,
+                    st.session_state.rag,
+                    st.session_state.workflow_id
+                ))
+                
+                # Add response to messages
+                if response.get('summary'):
+                    st.session_state.messages.append(
+                        AIMessage(content=response['summary'])
+                    )
+                
+                # Store response for display
+                st.session_state.last_response = response
+                
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+            finally:
+                # Clear processing state
+                st.session_state.is_processing = False
+                st.session_state.current_prompt = None
+                st.session_state.processing_stage = None
+                
+                # Trigger final rerun to show results
+                st.rerun()
+
+
+async def process_user_message_with_status_updates(
+    prompt, temp_file_path, stage_name, output_mgr, executor, plot_cache, rag, workflow_id
+):
+    """Enhanced processing with status updates"""
+    
+    # Update status at each major step
+    stages = [
+        "Checking RAG for existing context",
+        "Analyzing existing outputs", 
+        "Generating code",
+        "Executing code",
+        "Analyzing results",
+        "Creating summary"
+    ]
+    
+    # This is a simplified version - in practice you'd update st.session_state.processing_stage
+    # at each step in your workflow
+    
+    initial_state = {
+        "messages": st.session_state.messages,
+        "input_data_path": temp_file_path,
+        "stage_name": stage_name,
+        "workflow_id": workflow_id,
+        "rag_context": {},
+        "can_answer_from_rag": False,
+        "stage_metadata": {}
+    }
+    
+    execution_context = {
+        'executor': executor,
+        'output_manager': output_mgr,
+        'plot_cache': plot_cache,
+        'rag': rag
+    }
+    
+    response = await code_workflow.ainvoke(
+        initial_state,
+        context=execution_context
+    )
+    
+    return response
+
+
+def render_chat_message(message):
+    """Render a single chat message"""
+    role = 'user' if isinstance(message, HumanMessage) else 'assistant'
+    
+    with st.chat_message(role):
+        if "```python" in message.content:
+            # Extract and show code in expander
+            parts = message.content.split("```python")
+            st.write(parts[0])
+            if len(parts) > 1:
+                code = parts[1].split("```")[0]
+                with st.expander("View Code"):
+                    st.code(code, language="python")
+        else:
+            st.write(message.content)
+
+
+# Usage in your main app:
+def main_nonblocking():
+    """Main app with non-blocking UI approach"""
     initialize_session_state()
     
     # Header
@@ -687,51 +838,50 @@ def main():
     # Sidebar
     model, stage_name = render_sidebar()
     
-    # Main content tabs
-    tab1, tab2, tab3 = st.tabs(["💬 Chat", "🎨 Artifacts", "🧠 RAG Explorer"])
+    # Initialize session state
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+    if "is_processing" not in st.session_state:
+        st.session_state.is_processing = False
+    
+    st.title("🤖 Data Science Agent - Non-Blocking UI")
+    
+    # Tabs
+    tab1, tab2, tab3 = st.tabs(["💬 Chat", "🎨 Artifacts", "📊 Status"])
     
     with tab1:
-        render_chat_interface(model, stage_name)
+        render_chat_interface_nonblocking("model", "analysis")
     
     with tab2:
-        col1, col2 = st.columns([4, 1])
-        with col2:
-            if st.button("🔄 Refresh", use_container_width=True, key="_refresh_artifacts"):
-                st.rerun()
-        render_artifacts_view(st.session_state.output_mgr, stage_name)
+        st.header("Artifacts")
+        if st.session_state.get("is_processing"):
+            st.info("🔄 Processing in progress. Existing artifacts are shown below:")
+        
+        # Show existing artifacts
+        render_artifacts_view(st.session_state.output_mgr, "analysis")
+        
     
     with tab3:
-        st.markdown("### 🧠 RAG Context Explorer")
+        st.header("Processing Status")
         
-        if st.session_state.rag and st.session_state.rag.enabled:
-            # Query interface
-            query = st.text_input("Search RAG context:", placeholder="Enter a query to search stored context...")
+        if st.session_state.get("is_processing"):
+            st.warning(f"🔄 Currently processing: {st.session_state.get('processing_stage', 'Unknown')}")
             
-            if query:
-                with st.spinner("Searching..."):
-                    contexts = st.session_state.rag.query_relevant_context(
-                        query=query,
-                        workflow_id=st.session_state.workflow_id,
-                        n_results=5
-                    )
-                    
-                    if contexts:
-                        st.success(f"Found {len(contexts)} relevant documents")
-                        for ctx in contexts:
-                            with st.expander(f"📄 {ctx['metadata'].get('type', 'document')}: {ctx['metadata'].get('stage_name', 'unknown')}"):
-                                st.markdown("**Content:**")
-                                st.text(ctx['document'][:500])
-                                st.markdown("**Metadata:**")
-                                st.json(ctx['metadata'])
-                    else:
-                        st.warning("No relevant context found")
+            # Show progress
+            progress = st.progress(0.5)  # You'd update this based on actual progress
             
-            # RAG statistics
-            st.divider()
-            rag_stats = st.session_state.rag.get_stats()
-            st.json(rag_stats)
+            # Show elapsed time
+            if "processing_start_time" in st.session_state:
+                elapsed = (datetime.now() - st.session_state.processing_start_time).seconds
+                st.metric("Elapsed Time", f"{elapsed}s")
         else:
-            st.error("RAG system is not enabled")
+            st.success("✅ No active processing")
+        
+        # Show recent completions
+        if "last_response" in st.session_state:
+            with st.expander("Last Completed Task"):
+                st.json({"summary": st.session_state.last_response.get("summary", "N/A")[:200]})
+
 
 if __name__ == "__main__":
-    main()
+    main_nonblocking()

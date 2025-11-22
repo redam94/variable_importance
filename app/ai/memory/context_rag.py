@@ -543,7 +543,7 @@ Output:
             
             for _, ctx in chunks:
                 doc_text = ctx['document']
-                
+                logger.debug(f"Adding chunk (type={doc_type}, stage={stage}, size={len(doc_text)}) to context")
                 if total_length + len(doc_text) > max_chars:
                     remaining = max_chars - total_length
                     if remaining > 100:
@@ -559,7 +559,7 @@ Output:
             
             if total_length >= max_chars:
                 break
-        
+        logger.debug(f"Total context length: {total_length} characters")
         return "\n".join(context_parts)
     
     def delete_by_workflow(self, workflow_id: str):
