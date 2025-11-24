@@ -3,6 +3,8 @@ Session Persistence System
 
 Saves and restores Streamlit session state across page refreshes.
 Uses file-based storage to maintain chat history, settings, and state.
+
+IMPORTANT: Excludes widget keys that cannot be set via st.session_state
 """
 
 import json
@@ -23,6 +25,7 @@ class SessionPersistence:
     - Automatic session identification
     - Selective persistence (only save what's needed)
     - Handles complex objects (pickles them separately)
+    - Excludes widget keys that can't be restored
     """
     
     def __init__(self, cache_dir: str = "cache/sessions"):
@@ -35,6 +38,16 @@ class SessionPersistence:
         self.cache_dir = Path(cache_dir).resolve()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"💾 SessionPersistence initialized: {self.cache_dir}")
+        
+        # Widget keys that cannot be set via st.session_state
+        self.widget_keys = {
+            "file_uploader",
+            "_file_uploader", 
+            "model_selector",
+            "workflow_id_input",
+            "stage_name_input",
+            # Add any other widget keys here
+        }
     
     def _generate_session_id(self, custom_id: Optional[str] = None) -> str:
         """
@@ -79,9 +92,15 @@ class SessionPersistence:
             session_file = self._get_session_file(session_id)
             pickle_file = self._get_pickle_file(session_id)
             
-            # Default exclusions
+            # Default exclusions (including widget keys)
             if exclude_keys is None:
                 exclude_keys = []
+            
+            # Add widget keys to exclusions
+            exclude_keys.extend(self.widget_keys)
+            
+            # Also exclude any key that starts with underscore (internal Streamlit keys)
+            exclude_keys.extend([k for k in session_state.keys() if k.startswith('_')])
             
             # Separate serializable and non-serializable data
             json_data = {}
@@ -279,12 +298,13 @@ def save_streamlit_session(st_session_state, session_id: Optional[str] = None):
     # Convert session_state to dict
     state_dict = dict(st_session_state)
     
-    # Exclude keys that shouldn't be persisted
+    # Keys to exclude from persistence (cannot be pickled or should be recreated)
     exclude_keys = [
-        "executor",  # Will be recreated
+        "executor",  # Will be recreated (contains thread objects)
         "plot_cache",  # Will be recreated
-        "rag",  # Will be recreated
+        "rag",  # Will be recreated (contains ChromaDB client)
         "output_mgr",  # Will be recreated based on workflow_id
+        "task_manager",  # Will be recreated (contains threads!) ⭐
     ]
     
     persistence.save_session(state_dict, session_id, exclude_keys)
@@ -302,7 +322,7 @@ def load_streamlit_session(st_session_state, session_id: Optional[str] = None):
     saved_state = persistence.load_session(session_id, max_age_hours=24)
     
     if saved_state:
-        # Restore saved state
+        # Restore saved state (excluding widget keys)
         for key, value in saved_state.items():
             if key not in st_session_state:
                 if key.startswith("_"):
@@ -351,7 +371,9 @@ def test_persistence():
             "messages": ["Hello", "World"],
             "workflow_id": "test_workflow",
             "counter": 42,
-            "settings": {"model": "test-model", "temperature": 0.7}
+            "settings": {"model": "test-model", "temperature": 0.7},
+            "file_uploader": "SHOULD BE EXCLUDED",  # Widget key
+            "_internal": "SHOULD BE EXCLUDED"  # Internal key
         }
         
         success = persistence.save_session(test_state, session_id="test_001")
@@ -363,7 +385,9 @@ def test_persistence():
         loaded_state = persistence.load_session(session_id="test_001")
         assert loaded_state["workflow_id"] == "test_workflow"
         assert loaded_state["counter"] == 42
-        print("✅ Load works")
+        assert "file_uploader" not in loaded_state, "Widget keys should be excluded"
+        assert "_internal" not in loaded_state, "Internal keys should be excluded"
+        print("✅ Load works (widget keys excluded)")
         
         # Test 3: List sessions
         print("\n3. Testing list sessions...")

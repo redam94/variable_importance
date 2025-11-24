@@ -1,12 +1,11 @@
 from langgraph.runtime import Runtime
 from loguru import logger
 from langchain_ollama import ChatOllama
-from langchain.messages import HumanMessage, SystemMessage, AIMessage
+from langchain.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from .config import DefaultConfig
 from .state import State, ExecutionDeps
-
 
 DEFAULT_CONFIG = DefaultConfig()
 
@@ -153,7 +152,7 @@ def summarize_from_rag(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
         for i, ctx in enumerate(contexts, 1):
             context = (
                 context 
-                + f"Context {i} from stage [{ctx.get('metadata', {}).get('stage_name', 'unknown')} type: {ctx.get('metadata', {}).get('type', '')}, relevance: {ctx.get('distance', ''):0.5f}" 
+                + f"[Stage {ctx.get('metadata', {}).get('stage_name', 'unknown')}, Type: {ctx.get('metadata', {}).get('type', '')}, Rating: {1-ctx.get('distance', ''):0.5f}" 
                 + (f", plot name: {ctx.get('metadata', {}).get('plot_name', '')}]" if ctx.get('metadata', {}).get('plot_name', '') else "]")
                 +f":\n\n{ctx.get('document', '')}\n\n" 
             )

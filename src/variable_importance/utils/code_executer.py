@@ -324,6 +324,7 @@ os.chdir('{working_dir}')
                 ['*.png', '*.jpg', '*.csv', '*.pkl', '*.txt', '*.json', '*.html']
             )
         
+        output_manager.save_manifest()
         logger.info(f"✅ All outputs saved for {stage_name}\n")
         
         return result

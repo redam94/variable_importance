@@ -41,6 +41,7 @@ variable-importance = { workspace = true }
 
 [dependency-groups]
 stats = [
+    "imblearn>=0.0",
     "scikit-learn>=1.7.2",
     "statsmodels>=0.14.5",
     "xgboost>=3.1.1",

@@ -329,7 +329,10 @@ class OutputManager:
                     dest_subdir = stage_dir
                 
                 dest_file = dest_subdir / source_file.name
-                shutil.copy2(source_file, dest_file)
+                if not suffix in ['.csv', '.xlsx', '.parquet', '.json']:
+                    shutil.move(source_file, dest_file)
+                else:
+                    shutil.copy2(source_file, dest_file)
                 copied_files.append(dest_file)
                 
                 logger.info(f"📦 Copied file: {dest_file}")

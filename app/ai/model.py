@@ -282,6 +282,7 @@ Requirements:
 - Use matplotlib with 'Agg' backend
 - Ensure code is self-contained and executable
 - Wrap sections in try-except for error handling
+- Raise exceptions for critical failures
 
 {relevant_context}
 

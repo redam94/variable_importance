@@ -496,7 +496,8 @@ Output:
         query: str,
         workflow_id: Optional[str] = None,
         stage_name: Optional[str] = None,
-        max_tokens: int = 2000
+        max_tokens: int = 2000,
+        max_chunks: int = 15
     ) -> str:
         """
         Get a concise context summary relevant to the query.
@@ -510,7 +511,7 @@ Output:
             query=query,
             workflow_id=workflow_id,
             stage_name=stage_name,
-            n_results=15  # Get more chunks since they're smaller
+            n_results=max_chunks  # Get more chunks since they're smaller
         )
         
         if not contexts:
@@ -562,6 +563,7 @@ Output:
         logger.debug(f"Total context length: {total_length} characters")
         return "\n".join(context_parts)
     
+
     def delete_by_workflow(self, workflow_id: str):
         """Delete all documents for a specific workflow."""
         if not self.enabled:
