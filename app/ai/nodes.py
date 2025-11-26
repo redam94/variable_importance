@@ -1,5 +1,5 @@
 """
-Workflow Nodes - All node functions in one place.
+Workflow Nodes - All node functions with progress streaming.
 
 Simplified to 4 main nodes:
 1. gather_context - Get RAG, web, existing outputs
@@ -13,7 +13,7 @@ import base64
 import shutil
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from loguru import logger
 
 from pydantic import BaseModel, Field
@@ -41,6 +41,19 @@ def get_query(state: State) -> str:
     return messages[-1].content if messages else ""
 
 
+def get_emitter(deps: Deps):
+    """Get progress emitter from deps if available."""
+    return deps.get("progress_emitter")
+
+
+def emit_progress(deps: Deps, stage: str, message: str, data: Optional[Dict] = None):
+    """Emit progress event if emitter available."""
+    emitter = get_emitter(deps)
+    if emitter:
+        from utils.progress_events import EventType
+        emitter.emit(EventType.PROGRESS, stage, message, data)
+
+
 # =============================================================================
 # NODE 1: GATHER CONTEXT
 # =============================================================================
@@ -51,8 +64,12 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
     
     Returns combined context for use in planning and code generation.
     """
-    logger.info("📦 Gathering context...")
     deps = runtime.context
+    emitter = get_emitter(deps)
+    
+    if emitter:
+        emitter.stage_start("gather_context", "Gathering context from RAG, web, and existing outputs")
+    
     query = get_query(state)
     workflow_id = state.get("workflow_id", "default")
     
@@ -63,6 +80,9 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
     rag = deps.get("rag")
     if rag and rag.enabled:
         try:
+            if emitter:
+                emitter.rag_query("gather_context", 0)
+            
             rag_summary = rag.get_context_summary(
                 query=query,
                 workflow_id=workflow_id,
@@ -71,25 +91,57 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
             if rag_summary:
                 context["rag"] = rag_summary
                 parts.append(f"[Previous Analysis]\n{rag_summary}")
+                
+                if emitter:
+                    emitter.rag_query("gather_context", len(rag_summary.split('\n')))
+                
                 logger.info(f"📚 RAG: {len(rag_summary)} chars")
         except Exception as e:
             logger.warning(f"RAG failed: {e}")
     
-    # 2. Web Search (if enabled)
+    # 2. Web Search (if enabled) - Use agent-based search
     if state.get("web_search_enabled"):
         try:
-            from .web_search import search_analytics_methods
-            result = await search_analytics_methods(query, max_results=2)
-            if result.results:
-                web_text = "\n".join(
-                    f"- {r.title}: {r.content[:300]}" 
-                    for r in result.results[:2]
-                )
-                context["web"] = web_text
-                parts.append(f"[Web Research]\n{web_text}")
-                logger.info(f"🌐 Web: {len(result.results)} results")
+            from .web_search import search_and_synthesize
+            
+            def on_search_progress(msg: str):
+                if emitter:
+                    emit_progress(deps, "gather_context", f"🌐 {msg}")
+            
+            # Get LLM config from deps
+            llm_model = deps.get("llm", DEFAULTS["llm"])
+            base_url = deps.get("base_url", DEFAULTS["base_url"])
+            
+            # Use agent-based search with synthesis
+            search_result = await search_and_synthesize(
+                query=query,
+                context=context.get("rag", ""),  # Pass RAG context to help refine queries
+                llm_model=llm_model,
+                base_url=base_url,
+                on_progress=on_search_progress
+            )
+            
+            if search_result["results"]:
+                context["web"] = search_result["formatted_text"]
+                parts.append(f"[Web Research]\n{search_result['formatted_text']}")
+                
+                if emitter:
+                    queries_count = len(search_result["queries_used"])
+                    results_count = len(search_result["results"])
+                    relevance = search_result["synthesis"].relevance_score
+                    emitter.web_search("gather_context", f"{queries_count} queries", results_count)
+                    emit_progress(deps, "gather_context", 
+                        f"📊 Web search: {results_count} results, {relevance:.0%} relevance")
+                
+                logger.info(f"🌐 Web: {len(search_result['results'])} results from {len(search_result['queries_used'])} queries")
+                
+            if search_result.get("error"):
+                logger.warning(f"Web search had errors: {search_result['error']}")
+                
         except Exception as e:
             logger.warning(f"Web search failed: {e}")
+            if emitter:
+                emit_progress(deps, "gather_context", f"⚠️ Web search failed: {e}")
     
     # 3. Existing Outputs
     output_manager = deps.get("output_manager")
@@ -104,6 +156,9 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
                 if plot_files:
                     context["plots"] = [str(p) for p in plot_files]
                     parts.append(f"[Existing Plots: {len(plot_files)}]")
+                    
+                    if emitter:
+                        emit_progress(deps, "gather_context", f"📊 Found {len(plot_files)} existing plots")
             
             # Check console output
             console_files = list(stage_dir.glob("console_output_*.txt"))
@@ -119,6 +174,10 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
     
     # Combine all context
     context["combined"] = "\n\n".join(parts) if parts else "No prior context."
+    
+    if emitter:
+        emitter.stage_end("gather_context", success=True)
+    
     logger.info(f"📦 Context assembled: {len(context['combined'])} chars")
     
     return {"context": context}
@@ -138,11 +197,13 @@ class PlanDecision(BaseModel):
 def plan_and_decide(state: State, runtime: Runtime[Deps]) -> dict:
     """
     Create analysis plan and decide: answer from context or execute code.
-    
-    Single LLM call combines planning and routing decision.
     """
-    logger.info("🧠 Planning...")
     deps = runtime.context
+    emitter = get_emitter(deps)
+    
+    if emitter:
+        emitter.stage_start("plan_and_decide", "Creating analysis plan")
+    
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
     has_data = bool(state.get("data_path"))
@@ -166,10 +227,18 @@ Rules:
 
 Create a specific, actionable plan."""
 
+    if emitter:
+        emit_progress(deps, "plan_and_decide", "🧠 Analyzing query and context...")
+
     result = llm.invoke([
         SystemMessage(content="You are a data scientist. Plan the analysis and decide the action."),
         HumanMessage(content=prompt)
     ])
+    
+    if emitter:
+        emit_progress(deps, "plan_and_decide", f"📋 Plan created: {result.action}")
+        emit_progress(deps, "plan_and_decide", f"Strategy: {result.reasoning[:100]}...")
+        emitter.stage_end("plan_and_decide", success=True)
     
     logger.info(f"🎯 Action: {result.action} ({result.reasoning[:50]}...)")
     
@@ -192,15 +261,19 @@ class GeneratedCode(BaseModel):
 async def execute(state: State, runtime: Runtime[Deps]) -> dict:
     """
     Generate code, execute it, and fix errors (up to max_retries).
-    
-    Combines code generation, execution, and fixing in one node.
     """
-    logger.info("🚀 Executing...")
     deps = runtime.context
+    emitter = get_emitter(deps)
+    
+    if emitter:
+        emitter.stage_start("execute", "Generating and executing code")
+    
     query = get_query(state)
     data_path = Path(state.get("data_path", ""))
     
     if not data_path.exists():
+        if emitter:
+            emitter.stage_end("execute", success=False)
         return {"error": "Data file not found", "code": "", "output": None}
     
     # Setup execution directory
@@ -216,6 +289,9 @@ async def execute(state: State, runtime: Runtime[Deps]) -> dict:
     
     code_llm = get_llm(deps, "code_llm").with_structured_output(GeneratedCode)
     
+    if emitter:
+        emit_progress(deps, "execute", "✍️ Generating code...")
+    
     # Generate initial code
     code_prompt = f"""Write Python code to analyze '{data_path.name}'.
 
@@ -230,7 +306,8 @@ Requirements:
 - Use matplotlib with 'Agg' backend
 - Save plots with descriptive names (plt.savefig)
 - Print key findings to stdout
-- Handle errors gracefully"""
+- Raise exceptions on errors with clear messages
+- Ensure code is executable as-is"""
 
     result = code_llm.invoke([
         SystemMessage(content="Write complete, executable Python code."),
@@ -238,6 +315,11 @@ Requirements:
     ])
     
     code = result.code
+    
+    if emitter:
+        emitter.code_generated("execute", code[:300])
+        emit_progress(deps, "execute", f"📝 Code generated ({len(code)} chars)")
+    
     logger.info(f"✍️ Code generated ({len(code)} chars)")
     
     # Execute with retry loop
@@ -247,6 +329,9 @@ Requirements:
     error = ""
     
     for attempt in range(max_retries + 1):
+        if emitter:
+            emit_progress(deps, "execute", f"⚡ Execution attempt {attempt + 1}/{max_retries + 1}")
+        
         logger.info(f"⚡ Attempt {attempt + 1}/{max_retries + 1}")
         
         output = await executor.execute_with_output_manager(
@@ -257,14 +342,25 @@ Requirements:
         )
         
         if output.success:
+            if emitter:
+                emitter.code_output("execute", output.stdout[:300] if output.stdout else "No output")
+                emit_progress(deps, "execute", "✅ Execution succeeded!")
             logger.info("✅ Execution succeeded")
             error = ""
             break
         
         error = output.stderr or output.error or "Unknown error"
+        
+        if emitter:
+            emitter.code_output("execute", error[:300], is_error=True)
+            emit_progress(deps, "execute", f"❌ Attempt {attempt + 1} failed")
+        
         logger.warning(f"❌ Failed: {error[:100]}...")
         
         if attempt < max_retries:
+            if emitter:
+                emit_progress(deps, "execute", "🔧 Attempting to fix code...")
+            
             # Try to fix
             fix_prompt = f"""Fix this code error:
 
@@ -287,6 +383,10 @@ Return the complete fixed code."""
                     HumanMessage(content=fix_prompt)
                 ])
                 code = fix_result.code
+                
+                if emitter:
+                    emit_progress(deps, "execute", "🔧 Code fixed, retrying...")
+                
                 logger.info("🔧 Code fixed, retrying...")
             except Exception as e:
                 logger.error(f"Fix failed: {e}")
@@ -304,6 +404,9 @@ Return the complete fixed code."""
             success=True
         )
     
+    if emitter:
+        emitter.stage_end("execute", success=(output and output.success))
+    
     return {
         "code": code,
         "output": output,
@@ -319,8 +422,12 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
     """
     Analyze any plots with vision LLM, then create comprehensive summary.
     """
-    logger.info("📝 Summarizing...")
     deps = runtime.context
+    emitter = get_emitter(deps)
+    
+    if emitter:
+        emitter.stage_start("summarize", "Analyzing results and creating summary")
+    
     query = get_query(state)
     
     # Gather results
@@ -342,6 +449,9 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
                 plot_files = list(plots_dir.glob("*.png"))[-5:]  # Last 5 plots
                 
                 if plot_files:
+                    if emitter:
+                        emit_progress(deps, "summarize", f"🔍 Analyzing {len(plot_files)} plots...")
+                    
                     vision_llm = get_llm(deps, "vision_llm")
                     
                     for plot_path in plot_files:
@@ -350,9 +460,14 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
                             cached = plot_cache.get(str(plot_path))
                             if cached:
                                 plot_analyses.append(cached)
+                                if emitter:
+                                    emit_progress(deps, "summarize", f"⚡ Cache hit: {plot_path.name}")
                                 continue
                         
                         try:
+                            if emitter:
+                                emit_progress(deps, "summarize", f"🔍 Analyzing: {plot_path.name}")
+                            
                             with open(plot_path, "rb") as f:
                                 img_data = base64.b64encode(f.read()).decode()
                             
@@ -373,6 +488,9 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
                             if plot_cache:
                                 plot_cache.set(str(plot_path), analysis)
                             
+                            if emitter:
+                                emitter.plot_analyzed("summarize", plot_path.name, response.content[:100])
+                            
                             logger.info(f"🔍 Analyzed: {plot_path.name}")
                             
                         except Exception as e:
@@ -382,16 +500,16 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
             logger.warning(f"Plot gathering failed: {e}")
     
     # Build summary context
+    if emitter:
+        emit_progress(deps, "summarize", "📝 Generating comprehensive summary...")
+    
     summary_parts = []
     
     if stdout:
         summary_parts.append(f"Code Output:\n{stdout[:2000]}")
     
     if plot_analyses:
-        
         plots_text = "\n".join(f"- {p['plot']}: {p['analysis'][:300]}" for p in plot_analyses if 'plot' in p and 'analysis' in p)
-        logger.info(f"🖼️ Plot analyses: {len(plot_analyses)}")
-        logger.debug(f"Plot analyses details: {plots_text}")
         summary_parts.append(f"Plot Analyses:\n{plots_text}")
     
     if context.get("rag"):
@@ -431,6 +549,9 @@ Be thorough, specific, and actionable. Reference specific findings from the resu
             workflow_id=state.get("workflow_id", "default")
         )
     
+    if emitter:
+        emitter.stage_end("summarize", success=True)
+    
     logger.info("✅ Summary complete")
     
     return {"summary": response.content}
@@ -444,12 +565,19 @@ def answer_from_context(state: State, runtime: Runtime[Deps]) -> dict:
     """
     Answer directly from gathered context (no code execution).
     """
-    logger.info("💬 Answering from context...")
     deps = runtime.context
+    emitter = get_emitter(deps)
+    
+    if emitter:
+        emitter.stage_start("answer", "Answering from existing context")
+    
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
     
     llm = get_llm(deps)
+    
+    if emitter:
+        emit_progress(deps, "answer", "💬 Generating answer from context...")
     
     prompt = f"""Answer the user's query using the available context.
 
@@ -467,6 +595,9 @@ Provide a clear, helpful answer based on the context."""
         SystemMessage(content="Answer based on the provided context."),
         HumanMessage(content=prompt)
     ])
+    
+    if emitter:
+        emitter.stage_end("answer", success=True)
     
     return {"summary": response.content}
 

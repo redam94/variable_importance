@@ -51,6 +51,9 @@ class Deps(TypedDict, total=False):
     rag: Any
     plot_cache: Any
     
+    # Progress tracking
+    progress_emitter: Any  # ProgressEmitter for real-time updates
+    
     # Model names
     llm: str
     code_llm: str
