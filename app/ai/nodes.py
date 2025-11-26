@@ -307,7 +307,7 @@ Requirements:
 - Save plots with descriptive names (plt.savefig)
 - Print key findings to stdout
 - Raise exceptions on errors with clear messages
-- Ensure code is executable as-is"""
+- Be sure to raise errors if any issues occur"""
 
     result = code_llm.invoke([
         SystemMessage(content="Write complete, executable Python code."),
@@ -429,7 +429,10 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
         emitter.stage_start("summarize", "Analyzing results and creating summary")
     
     query = get_query(state)
-    
+
+    # Store summary in RAG
+    rag = deps.get("rag")
+
     # Gather results
     output = state.get("output")
     stdout = output.stdout if output and hasattr(output, 'stdout') else ""
@@ -484,6 +487,15 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
                                 "analysis": response.content
                             }
                             plot_analyses.append(analysis)
+                            
+                            if rag and rag.enabled:
+                                rag.add_plot_analysis(
+                                    plot_name=plot_path.name,
+                                    plot_path=str(plot_path),
+                                    analysis=response.content,
+                                    stage_name=state.get("stage_name", "analysis"),
+                                    workflow_id=state.get("workflow_id", "default")
+                                )
                             
                             if plot_cache:
                                 plot_cache.set(str(plot_path), analysis)
@@ -540,8 +552,7 @@ Be thorough, specific, and actionable. Reference specific findings from the resu
         HumanMessage(content=summary_prompt)
     ])
     
-    # Store summary in RAG
-    rag = deps.get("rag")
+    
     if rag and rag.enabled:
         rag.add_summary(
             summary=response.content,

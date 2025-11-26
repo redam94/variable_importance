@@ -54,6 +54,7 @@ if not stage_dirs:
 total_plots = 0
 total_data_files = 0
 total_code_files = 0
+total_model_files = 0
 
 for stage_dir in stage_dirs:
     plots_dir = stage_dir / "plots"
@@ -65,9 +66,12 @@ for stage_dir in stage_dirs:
         total_data_files += len(list(data_dir.glob("*.csv")) + list(data_dir.glob("*.json")))
     
     total_code_files += len(list(stage_dir.glob("*.py")))
+    model_dir = stage_dir / "models"
+    if model_dir.exists():
+        total_model_files += len(list(model_dir.glob("*")))
 
 # Display summary
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     st.metric("📊 Stages", len(stage_dirs))
 with col2:
@@ -76,6 +80,8 @@ with col3:
     st.metric("📈 Data Files", total_data_files)
 with col4:
     st.metric("💾 Code Files", total_code_files)
+with col5:
+    st.metric("🧠 Model Files", total_model_files)
 
 st.divider()
 
@@ -179,6 +185,22 @@ for stage_dir in stage_dirs:
                 with st.expander(f"📋 {console_file.name}"):
                     with open(console_file, 'r') as f:
                         st.text(f.read())
+        model_files = sorted(list(stage_dir.glob("models/*")))
+        if model_files:
+            st.markdown(f"**🧠 Model Files ({len(model_files)})**")
+            for model_file in model_files:
+                col1, col2 = st.columns([4, 1])
+                with col1:
+                    st.text(f"🗄️ {model_file.name}")
+                with col2:
+                    with open(model_file, "rb") as f:
+                        st.download_button(
+                            label="⬇️",
+                            data=f,
+                            file_name=model_file.name,
+                            key=f"download_model_{model_file.stem}",
+                            use_container_width=True
+                        )
 
 # Sidebar info
 with st.sidebar:

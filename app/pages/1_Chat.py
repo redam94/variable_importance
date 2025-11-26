@@ -308,13 +308,13 @@ if task_id:
     if task:
         if task.status == TaskStatus.RUNNING:
             st.markdown(f'<div class="status-running">⏳ <b>Processing:</b> {task.description}</div>', unsafe_allow_html=True)
-            
+            logger.info(f"⏳ Task running: {task.task_id} - {task.description}")
             # Auto-refreshing progress display
             auto_refresh_progress()
             
         elif task.status == TaskStatus.COMPLETED and task.result:
             st.markdown('<div class="status-done">✅ <b>Complete!</b></div>', unsafe_allow_html=True)
-            
+            logger.info(f"✅ Task completed: {task.task_id}")
             result = task.result
             
             # Show final progress summary (static, not auto-refresh)
@@ -340,6 +340,7 @@ if task_id:
             )
             
             if not already_processed:
+                logger.info(f"🆕 Processing results for task: {task.task_id}")
                 # Add code if present
                 if result.get("code"):
                     code_msg = f"**Generated Code:**\n```python\n{result['code']}\n```"
