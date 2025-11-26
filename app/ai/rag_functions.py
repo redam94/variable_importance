@@ -3,11 +3,56 @@ from loguru import logger
 from langchain_ollama import ChatOllama
 from langchain.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
+from langchain.agents import create_agent
+from langchain.tools import tool
 
 from .config import DefaultConfig
 from .state import State, ExecutionDeps
 
 DEFAULT_CONFIG = DefaultConfig()
+
+def check_rag_for_context(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
+    """Check RAG for relevant context to answer user's query."""
+    workflow_id = state.get("workflow_id", "default")
+    rag = runtime.context.get("rag")
+    rag_llm = runtime.context.get("rag_llm", DEFAULT_CONFIG.rag_llm)
+
+    user_messages = state.get("messages", [])
+    latest_query = user_messages[-1].content if user_messages else ""
+    plan = state.get("plan", "")
+    logger.info(f"🔍 Checking RAG for existing context...")
+    if not rag or not rag.enabled:
+        logger.info("❌ RAG not available")
+        return {
+            "context_summary": ""
+        }
+    rag_llm = ChatOllama(
+                model=rag_llm,
+                temperature=0,
+                base_url=DEFAULT_CONFIG.base_url
+            )
+
+    @tool
+    def retrieve_context(query: str) -> str:
+        """Retrieve relevant context from RAG for the given query."""
+        return rag.get_context_summary(
+            query=query,
+            workflow_id=workflow_id,
+            max_tokens=2000
+        )
+    
+    agent = create_agent(
+        model=rag_llm,
+        tools=[retrieve_context],
+        system_prompt="Use the `retrieve_context` tool to gather relevant information. " \
+        "Use the user query and plan to decide what information to retrieve. And create query strings to do so. " \
+        "Make sure to provide accurate summaries of the retrieved information." \
+        "Only return the summary of the retrieved context. Do not try to answer the user's query yet." \
+        "If no relevant context is found, return an empty string."
+    )
+    summary = agent.invoke({"messages": [HumanMessage(content=f"User Query: {latest_query}\n\nPlan: {plan}")]}).get('messages', [])[-1].content
+    logger.debug(f"RAG context summary: {summary[:1000]}...")
+    return {"context_summary": summary}
 
 def get_context_from_rag(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
     """Check RAG for relevant context to answer user's query."""
@@ -28,7 +73,7 @@ def get_context_from_rag(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
         "confidence": 0.0
     }
     can_answer_from_rag = False
-    
+    context_summary = state.get("context_summary", "")
     if not rag or not rag.enabled:
         logger.info("❌ RAG not available")
         return {
@@ -48,12 +93,8 @@ def get_context_from_rag(state: State, runtime: Runtime[ExecutionDeps]) -> dict:
             rag_context["has_relevant_context"] = True
             rag_context["contexts"] = contexts
             
-            rag_summary = rag.get_context_summary(
-                query=latest_query,
-                workflow_id=workflow_id,
-                max_tokens=500
-            )
-            rag_context["summary"] = rag_summary
+
+            rag_context["summary"] = context_summary
             logger.info("📝 Generated RAG context summary")
             llm_answer = ChatOllama(
                 model=rag_llm,
@@ -83,7 +124,7 @@ Plan:
 
 RAG Context Summary:
 <rag_summary>
-{rag_summary}
+{context_summary}
 </rag_summary>
 
 Guidelines:

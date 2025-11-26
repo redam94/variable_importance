@@ -34,7 +34,7 @@ from langgraph.runtime import Runtime
 
 from .config import DefaultConfig
 from .state import State, ExecutionDeps
-from .rag_functions import get_context_from_rag, summarize_from_rag, route_after_rag_check
+from .rag_functions import get_context_from_rag, summarize_from_rag, route_after_rag_check, check_rag_for_context
 from .file_context import check_existing_outputs, analyze_plots_with_vision_llm
 
 
@@ -103,35 +103,35 @@ def determine_if_code_needed(state: State, runtime) -> str:
     plot_analyses = state.get("plot_analyses", [])
     rag_context = state.get("rag_context", {})
     
-    # Build comprehensive context for LLM
-    context_parts = []
+    # # Build comprehensive context for LLM
+    # context_parts = []
     
-    # RAG context
-    if rag_context.get("has_relevant_context"):
-        context_parts.append(f"📚 RAG Context: {len(rag_context.get('contexts', []))} relevant documents found")
-        if rag_context.get("summary"):
-            summary_preview = rag_context["summary"][:400] + "..." if len(rag_context["summary"]) > 400 else rag_context["summary"]
-            context_parts.append(f"Summary: {summary_preview}")
+    # # RAG context
+    # if rag_context.get("has_relevant_context"):
+    #     context_parts.append(f"📚 RAG Context: {len(rag_context.get('contexts', []))} relevant documents found")
+    #     if rag_context.get("summary"):
+    #         summary_preview = rag_context["summary"][:400] + "..." if len(rag_context["summary"]) > 400 else rag_context["summary"]
+    #         context_parts.append(f"Summary: {summary_preview}")
     
-    # Existing outputs
-    if existing_outputs.get("has_plots"):
-        context_parts.append(f"📊 Existing: {len(existing_outputs['plots'])} plots available")
+    # # Existing outputs
+    # if existing_outputs.get("has_plots"):
+    #     context_parts.append(f"📊 Existing: {len(existing_outputs['plots'])} plots available")
     
-    if existing_outputs.get("has_console_output"):
-        console_preview = '\n'.join(existing_outputs["console_output"])[:500]
-        context_parts.append(f"Console Output:\n{console_preview}")
+    # if existing_outputs.get("has_console_output"):
+    #     console_preview = '\n'.join(existing_outputs["console_output"])[:500]
+    #     context_parts.append(f"Console Output:\n{console_preview}")
     
-    # Plot analyses
-    if plot_analyses:
-        context_parts.append(f"🔍 Analyses: {len(plot_analyses)} plots analyzed")
-        for i, pa in enumerate(plot_analyses, 1):
-            analysis_preview = pa['analysis'][:200] + "..." if len(pa['analysis']) > 200 else pa['analysis']
-            context_parts.append(f"  Plot {i} ({pa['plot_name']}): {analysis_preview}")
+    # # Plot analyses
+    # if plot_analyses:
+    #     context_parts.append(f"🔍 Analyses: {len(plot_analyses)} plots analyzed")
+    #     for i, pa in enumerate(plot_analyses, 1):
+    #         analysis_preview = pa['analysis'][:200] + "..." if len(pa['analysis']) > 200 else pa['analysis']
+    #         context_parts.append(f"  Plot {i} ({pa['plot_name']}): {analysis_preview}")
     
-    if not context_parts:
-        context_parts.append("No existing outputs or context available")
+    # if not context_parts:
+    #     context_parts.append("No existing outputs or context available")
     
-    context_summary = "\n".join(context_parts)
+    context_summary = state.get("context_summary", "")
     
     # Define structured decision model
     class CodeDecision(BaseModel):
@@ -284,6 +284,11 @@ Requirements:
 - Wrap sections in try-except for error handling
 - Raise exceptions for critical failures
 
+Context:
+
+{state.get("context_summary", "")}
+
+Code Context:
 {relevant_context}
 
 Provide reasoning for your approach.
@@ -641,6 +646,7 @@ code_graph = StateGraph(State, ExecutionDeps)
 
 # Add all nodes
 code_graph.add_node("planning_agent", planning_agent)
+code_graph.add_node("get_context_from_rag", check_rag_for_context)
 code_graph.add_node("check_rag", get_context_from_rag)
 code_graph.add_node("summarize_from_rag", summarize_from_rag)
 code_graph.add_node("check_existing_outputs", check_existing_outputs)
@@ -656,7 +662,8 @@ code_graph.add_node("summarize_results", summarize_results)
 
 # Define edges - START WITH RAG CHECK
 code_graph.add_edge(START, "planning_agent")
-code_graph.add_edge("planning_agent", "check_rag")
+code_graph.add_edge("planning_agent", "get_context_from_rag")
+code_graph.add_edge("get_context_from_rag", "check_rag")
 
 # Route after RAG check
 code_graph.add_conditional_edges(

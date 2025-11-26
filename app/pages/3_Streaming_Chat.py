@@ -9,6 +9,8 @@ import streamlit as st
 import sys
 from pathlib import Path
 import httpx
+from datetime import datetime
+from loguru import logger
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -156,6 +158,19 @@ if prompt := st.chat_input("Ask me anything..."):
                         stage_name=st.session_state.get("stage_name"),
                         max_tokens=2000
                     )
+                @tool
+                def store_knowledge(document: str) -> str:
+                    """Store useful information the user provide in the RAG system for future reference
+                    along with the current time.
+                    """
+                    logger.info("Storing document in RAG...")
+                    rag.add_summary(
+                        summary=f"{document}",
+                        stage_name=st.session_state.get("stage_name"),
+                        workflow_id=st.session_state.get("workflow_id"),
+                        metadata={"time": datetime.now().isoformat()}
+                    )
+                    return "Document stored successfully."
                 
                 agent = create_agent(
                     model=llm,

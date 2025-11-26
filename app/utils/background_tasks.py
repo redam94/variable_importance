@@ -192,6 +192,7 @@ class BackgroundTaskManager:
             task.error = e
             task.status = TaskStatus.FAILED
             logger.error(f"❌ Task failed: {task.task_id} - {str(e)}")
+            logger.debug(e, exc_info=True)
         
         finally:
             task.completed_at = datetime.now()

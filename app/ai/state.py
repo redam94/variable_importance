@@ -23,6 +23,7 @@ class State(TypedDict):
     needs_user_feedback: bool
     user_feedback: str
     plan: str
+    context_summary: str
 
 
 class ExecutionDeps(TypedDict):
