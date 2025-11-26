@@ -1,36 +1,71 @@
-from typing import TypedDict, Any, List, Union, Annotated
-import operator
+"""
+Workflow State - Simplified
 
+Minimal state with clear purpose for each field.
+"""
+
+from typing import TypedDict, Any, List, Union, Annotated, Optional
+import operator
 from langchain.messages import HumanMessage, AIMessage, SystemMessage
 
-class State(TypedDict):
-    code: str
+
+class Context(TypedDict, total=False):
+    """All gathered context in one place."""
+    rag: str
+    web: str
+    outputs: str
+    plots: List[str]
+    combined: str
+
+
+class State(TypedDict, total=False):
+    """Minimal workflow state."""
+    
+    # Input
     messages: Annotated[List[Union[HumanMessage, AIMessage, SystemMessage]], operator.add]
-    input_data_path: str
+    data_path: str
     stage_name: str
-    code_output: Any  # ExecutionResult
-    summary: str
-    graph_summaries: Annotated[List[str], operator.add]
-    existing_outputs: dict
-    plot_analyses: Annotated[List[dict], operator.add]
-    skip_execution: bool
     workflow_id: str
-    rag_context: dict
-    can_answer_from_rag: bool
-    stage_metadata: dict
-    fix_attempt_count: int
-    last_error: str
-    needs_user_feedback: bool
-    user_feedback: str
+    web_search_enabled: bool
+    
+    # Context (gathered once)
+    context: Context
+    
+    # Plan & Decision
     plan: str
-    context_summary: str
+    action: str  # "answer" | "execute"
+    
+    # Execution
+    code: str
+    output: Any
+    error: str
+    
+    # Result
+    summary: str
 
 
-class ExecutionDeps(TypedDict):
-    executor: Any  # OutputCapturingExecutor
-    output_manager: Any  # OutputManager
-    plot_cache: Any  # PlotAnalysisCache
-    rag: Any  # ContextRAG
-    rag_llm: str
-    rag_summary_llm: str
+class Deps(TypedDict, total=False):
+    """Runtime dependencies - passed as context to workflow."""
+    executor: Any
+    output_manager: Any
+    rag: Any
+    plot_cache: Any
+    
+    # Model names
+    llm: str
     code_llm: str
+    vision_llm: str
+    
+    # Config
+    base_url: str
+    max_retries: int
+
+
+# Default configuration
+DEFAULTS = {
+    "llm": "qwen3:30b",
+    "code_llm": "qwen3-coder:30b",
+    "vision_llm": "qwen3-vl:30b",
+    "base_url": "http://100.91.155.118:11434",
+    "max_retries": 3,
+}
