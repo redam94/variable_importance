@@ -14,3 +14,4 @@ results/
 *.png
 cache/
 *.csv
+node_modules/
