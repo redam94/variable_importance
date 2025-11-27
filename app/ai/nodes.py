@@ -2,7 +2,7 @@
 Workflow Nodes - All node functions with progress streaming.
 
 Simplified to 4 main nodes:
-1. gather_context - Get RAG, web, existing outputs
+1. gather_context - Get RAG, web, existing outputs (stores web results in RAG)
 2. plan_and_decide - Create plan, decide action
 3. execute - Generate code, run it, fix errors
 4. summarize - Analyze results, create summary
@@ -60,7 +60,10 @@ def emit_progress(deps: Deps, stage: str, message: str, data: Optional[Dict] = N
 
 async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
     """
-    Gather all context in parallel: RAG, web search, existing outputs.
+    Gather all context in parallel: RAG, web search, existing outputs, documents.
+    
+    Web search results are stored in RAG for future retrieval.
+    Uploaded documents are also queried for relevant context.
     
     Returns combined context for use in planning and code generation.
     """
@@ -68,15 +71,16 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
     emitter = get_emitter(deps)
     
     if emitter:
-        emitter.stage_start("gather_context", "Gathering context from RAG, web, and existing outputs")
+        emitter.stage_start("gather_context", "Gathering context from RAG, web, documents, and existing outputs")
     
     query = get_query(state)
     workflow_id = state.get("workflow_id", "default")
+    stage_name = state.get("stage_name", "analysis")
     
     context = Context(rag="", web="", outputs="", plots=[], combined="")
     parts = []
     
-    # 1. RAG Context
+    # 1. RAG Context (includes previous web results and analysis)
     rag = deps.get("rag")
     if rag and rag.enabled:
         try:
@@ -98,8 +102,32 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
                 logger.info(f"📚 RAG: {len(rag_summary)} chars")
         except Exception as e:
             logger.warning(f"RAG failed: {e}")
+        
+        # 1b. Query uploaded documents separately for focused retrieval
+        try:
+            doc_results = rag.query_documents(
+                query=query,
+                workflow_id=workflow_id,
+                n_results=5
+            )
+            if doc_results:
+                doc_texts = []
+                for doc in doc_results:
+                    title = doc['metadata'].get('title', 'Unknown')
+                    content = doc['document'][:500]
+                    doc_texts.append(f"[{title}]: {content}")
+                
+                doc_context = "\n\n".join(doc_texts)
+                parts.append(f"[Reference Documents]\n{doc_context}")
+                
+                if emitter:
+                    emit_progress(deps, "gather_context", f"📄 Found {len(doc_results)} relevant document chunks")
+                
+                logger.info(f"📄 Documents: {len(doc_results)} chunks")
+        except Exception as e:
+            logger.warning(f"Document query failed: {e}")
     
-    # 2. Web Search (if enabled) - Use agent-based search
+    # 2. Web Search (if enabled) - Results are stored in RAG
     if state.get("web_search_enabled"):
         try:
             from .web_search import search_and_synthesize
@@ -108,14 +136,12 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
                 if emitter:
                     emit_progress(deps, "gather_context", f"🌐 {msg}")
             
-            # Get LLM config from deps
             llm_model = deps.get("llm", DEFAULTS["llm"])
             base_url = deps.get("base_url", DEFAULTS["base_url"])
             
-            # Use agent-based search with synthesis
             search_result = await search_and_synthesize(
                 query=query,
-                context=context.get("rag", ""),  # Pass RAG context to help refine queries
+                context=context.get("rag", ""),
                 llm_model=llm_model,
                 base_url=base_url,
                 on_progress=on_search_progress
@@ -124,6 +150,41 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
             if search_result["results"]:
                 context["web"] = search_result["formatted_text"]
                 parts.append(f"[Web Research]\n{search_result['formatted_text']}")
+                
+                # Store web results in RAG for future queries
+                if rag and rag.enabled:
+                    try:
+                        web_results_for_rag = [
+                            {
+                                "url": r.url,
+                                "title": r.title,
+                                "content": r.content,
+                                "score": r.score,
+                                "source": r.source,
+                                "enriched": "crawl4ai" in r.source.lower(),
+                                "query_used": r.query_used
+                            }
+                            for r in search_result["results"]
+                        ]
+                        rag.add_web_search_batch(
+                            query=query,
+                            results=web_results_for_rag,
+                            stage_name=stage_name,
+                            workflow_id=workflow_id,
+                            metadata={
+                                "queries_used": ", ".join(search_result["queries_used"]),
+                                "relevance_score": search_result["synthesis"].relevance_score
+                            }
+                        )
+                        
+                        enriched_count = sum(1 for r in web_results_for_rag if r["enriched"])
+                        if emitter:
+                            emit_progress(deps, "gather_context", 
+                                f"💾 Stored {len(web_results_for_rag)} web results in RAG ({enriched_count} enriched)")
+                        
+                        logger.info(f"💾 Stored {len(web_results_for_rag)} web results in RAG ({enriched_count} enriched)")
+                    except Exception as e:
+                        logger.warning(f"Failed to store web results in RAG: {e}")
                 
                 if emitter:
                     queries_count = len(search_result["queries_used"])
@@ -149,7 +210,6 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
         try:
             stage_dir = output_manager.get_stage_dir(state["stage_name"])
             
-            # Check for plots
             plots_dir = stage_dir / "plots"
             if plots_dir.exists():
                 plot_files = list(plots_dir.glob("*.png"))
@@ -160,7 +220,6 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
                     if emitter:
                         emit_progress(deps, "gather_context", f"📊 Found {len(plot_files)} existing plots")
             
-            # Check console output
             console_files = list(stage_dir.glob("console_output_*.txt"))
             if console_files:
                 latest = sorted(console_files)[-1]
@@ -172,7 +231,6 @@ async def gather_context(state: State, runtime: Runtime[Deps]) -> dict:
         except Exception as e:
             logger.warning(f"Output check failed: {e}")
     
-    # Combine all context
     context["combined"] = "\n\n".join(parts) if parts else "No prior context."
     
     if emitter:
@@ -276,14 +334,12 @@ async def execute(state: State, runtime: Runtime[Deps]) -> dict:
             emitter.stage_end("execute", success=False)
         return {"error": "Data file not found", "code": "", "output": None}
     
-    # Setup execution directory
     output_manager = deps.get("output_manager")
     stage_dir = output_manager.get_stage_dir(state.get("stage_name", "analysis"))
     exec_dir = stage_dir / "execution"
     exec_dir.mkdir(exist_ok=True, parents=True)
     shutil.copy(data_path, exec_dir / data_path.name)
     
-    # Get context for code generation
     context = state.get("context", {})
     context_text = context.get("combined", "")[:2000]
     
@@ -292,7 +348,6 @@ async def execute(state: State, runtime: Runtime[Deps]) -> dict:
     if emitter:
         emit_progress(deps, "execute", "✍️ Generating code...")
     
-    # Generate initial code
     code_prompt = f"""Write Python code to analyze '{data_path.name}'.
 
 Plan:
@@ -322,7 +377,6 @@ Requirements:
     
     logger.info(f"✍️ Code generated ({len(code)} chars)")
     
-    # Execute with retry loop
     executor = deps.get("executor")
     max_retries = deps.get("max_retries", DEFAULTS["max_retries"])
     output = None
@@ -361,7 +415,6 @@ Requirements:
             if emitter:
                 emit_progress(deps, "execute", "🔧 Attempting to fix code...")
             
-            # Try to fix
             fix_prompt = f"""Fix this code error:
 
 Code:
@@ -430,15 +483,12 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
     
     query = get_query(state)
 
-    # Store summary in RAG
     rag = deps.get("rag")
 
-    # Gather results
     output = state.get("output")
     stdout = output.stdout if output and hasattr(output, 'stdout') else ""
     context = state.get("context", {})
     
-    # Analyze new plots with vision LLM
     plot_analyses = []
     output_manager = deps.get("output_manager")
     plot_cache = deps.get("plot_cache")
@@ -449,7 +499,7 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
             plots_dir = stage_dir / "plots"
             
             if plots_dir.exists():
-                plot_files = list(plots_dir.glob("*.png"))[-5:]  # Last 5 plots
+                plot_files = list(plots_dir.glob("*.png"))[-5:]
                 
                 if plot_files:
                     if emitter:
@@ -458,7 +508,6 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
                     vision_llm = get_llm(deps, "vision_llm")
                     
                     for plot_path in plot_files:
-                        # Check cache first
                         if plot_cache:
                             cached = plot_cache.get(str(plot_path))
                             if cached:
@@ -511,7 +560,6 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
         except Exception as e:
             logger.warning(f"Plot gathering failed: {e}")
     
-    # Build summary context
     if emitter:
         emit_progress(deps, "summarize", "📝 Generating comprehensive summary...")
     
@@ -532,7 +580,6 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
     
     results_context = "\n\n".join(summary_parts) if summary_parts else "No results available."
     
-    # Generate summary
     llm = get_llm(deps)
     
     summary_prompt = f"""Provide a comprehensive answer to the user's query.
@@ -551,7 +598,6 @@ Be thorough, specific, and actionable. Reference specific findings from the resu
         SystemMessage(content="You are a data scientist providing analysis results."),
         HumanMessage(content=summary_prompt)
     ])
-    
     
     if rag and rag.enabled:
         rag.add_summary(

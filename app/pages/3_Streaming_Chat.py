@@ -158,6 +158,7 @@ if prompt := st.chat_input("Ask me anything..."):
                         stage_name=st.session_state.get("stage_name"),
                         max_tokens=2000
                     )
+                
                 @tool
                 def store_knowledge(document: str) -> str:
                     """Store useful information the user provide in the RAG system for future reference
@@ -174,11 +175,15 @@ if prompt := st.chat_input("Ask me anything..."):
                 
                 agent = create_agent(
                     model=llm,
-                    tools=[retrieve_context],
+                    tools=[retrieve_context, store_knowledge],
                     system_prompt="Before answering create a plan to query the RAG system. " \
                     "You may use the `retrieve_context` tool multiple times to get relevant information. " \
-                    "If the context is sufficient, provide a concise answer. " \
-                    "Make sure to provide accurate and concise responses based on the retrieved information."
+                    "Be thorough in your search for relevant information. " \
+                    "Make sure to provide accurate responses based on the retrieved information. " \
+                    "If the user provides useful information, use the `store_knowledge` tool to save it. " \
+                    "Answer the user's query based on the gathered context. Answer in an expert tone with detailed explanations. "\
+                    "Use direct quotes from the retrieved context wherever possible. Cite the source of the information.",
+
                 )
                 
                 def response_generator():
