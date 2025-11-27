@@ -362,7 +362,10 @@ Requirements:
 - Save plots with descriptive names (plt.savefig)
 - Print key findings to stdout
 - Raise exceptions on errors with clear messages
-- Be sure to raise errors if any issues occur"""
+- Be sure to raise errors if any issues occur
+- Write clear, documented code
+- Break tasks into atomic modular functions that are composed in a main() function to produce the final output
+"""
 
     result = code_llm.invoke([
         SystemMessage(content="Write complete, executable Python code."),
@@ -499,7 +502,7 @@ async def summarize(state: State, runtime: Runtime[Deps]) -> dict:
             plots_dir = stage_dir / "plots"
             
             if plots_dir.exists():
-                plot_files = list(plots_dir.glob("*.png"))[-5:]
+                plot_files = list(plots_dir.glob("*.png"))
                 
                 if plot_files:
                     if emitter:
