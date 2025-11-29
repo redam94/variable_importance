@@ -29,7 +29,7 @@ from .state import State, Deps, Context, DEFAULTS
 from .factory import NodeFactory, NodeConfig, CodeOutput
 from .tools import WorkflowFileTools, create_file_tools_for_code
 from .routing import DynamicRouter, RouteDecision
-
+from .rag_agent_integration import gather_context_with_agent as gather_context
 
 # =============================================================================
 # FACTORY INSTANCE
@@ -80,145 +80,145 @@ def emit(deps: Deps, stage: str, message: str):
 # NODE: GATHER CONTEXT
 # =============================================================================
 
-async def gather_context(state: State, runtime) -> dict:
-    """
-    Gather all context: RAG, web search, existing outputs, documents.
+# async def gather_context(state: State, runtime) -> dict:
+#     """
+#     Gather all context: RAG, web search, existing outputs, documents.
     
-    Stores web results in RAG for future retrieval.
-    """
-    deps = runtime.context
-    emitter = get_emitter(deps)
+#     Stores web results in RAG for future retrieval.
+#     """
+#     deps = runtime.context
+#     emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("gather_context", "Gathering context")
+#     if emitter:
+#         emitter.stage_start("gather_context", "Gathering context")
     
-    query = get_query(state)
-    workflow_id = state.get("workflow_id", "default")
-    stage_name = state.get("stage_name", "analysis")
+#     query = get_query(state)
+#     workflow_id = state.get("workflow_id", "default")
+#     stage_name = state.get("stage_name", "analysis")
     
-    context = Context(rag="", web="", outputs="", plots=[], combined="")
-    parts = []
+#     context = Context(rag="", web="", outputs="", plots=[], combined="")
+#     parts = []
     
-    # 1. RAG Context
-    rag = deps.get("rag")
-    if rag and rag.enabled:
-        try:
-            emit(deps, "gather_context", "📚 Querying RAG...")
+#     # 1. RAG Context
+#     rag = deps.get("rag")
+#     if rag and rag.enabled:
+#         try:
+#             emit(deps, "gather_context", "📚 Querying RAG...")
             
-            rag_summary = rag.get_context_summary(
-                query=query,
-                workflow_id=workflow_id,
-                max_tokens=1500
-            )
-            if rag_summary:
-                context["rag"] = rag_summary
-                parts.append(f"[Previous Analysis]\n{rag_summary}")
+#             rag_summary = rag.get_context_summary(
+#                 query=query,
+#                 workflow_id=workflow_id,
+#                 max_tokens=1500
+#             )
+#             if rag_summary:
+#                 context["rag"] = rag_summary
+#                 parts.append(f"[Previous Analysis]\n{rag_summary}")
                 
-                if emitter:
-                    emitter.rag_query("gather_context", len(rag_summary.split('\n')))
+#                 if emitter:
+#                     emitter.rag_query("gather_context", len(rag_summary.split('\n')))
                 
-                logger.info(f"📚 RAG: {len(rag_summary)} chars")
+#                 logger.info(f"📚 RAG: {len(rag_summary)} chars")
                 
-            # Query documents separately
-            doc_results = rag.query_documents(
-                query=query,
-                workflow_id=workflow_id,
-                n_results=5
-            )
-            if doc_results:
-                doc_texts = [
-                    f"[{d['metadata'].get('title', 'Doc')}]: {d['document'][:500]}"
-                    for d in doc_results
-                ]
-                parts.append(f"[Reference Documents]\n" + "\n\n".join(doc_texts))
-                emit(deps, "gather_context", f"📄 Found {len(doc_results)} document chunks")
+#             # Query documents separately
+#             doc_results = rag.query_documents(
+#                 query=query,
+#                 workflow_id=workflow_id,
+#                 n_results=5
+#             )
+#             if doc_results:
+#                 doc_texts = [
+#                     f"[{d['metadata'].get('title', 'Doc')}]: {d['document'][:500]}"
+#                     for d in doc_results
+#                 ]
+#                 parts.append(f"[Reference Documents]\n" + "\n\n".join(doc_texts))
+#                 emit(deps, "gather_context", f"📄 Found {len(doc_results)} document chunks")
                 
-        except Exception as e:
-            logger.warning(f"RAG failed: {e}")
+#         except Exception as e:
+#             logger.warning(f"RAG failed: {e}")
     
-    # 2. Web Search (if enabled)
-    if state.get("web_search_enabled"):
-        try:
-            from .web_search import search_and_synthesize
+#     # 2. Web Search (if enabled)
+#     if state.get("web_search_enabled"):
+#         try:
+#             from .web_search import search_and_synthesize
             
-            emit(deps, "gather_context", "🌐 Searching web...")
+#             emit(deps, "gather_context", "🌐 Searching web...")
             
-            llm_model = deps.get("llm", DEFAULTS["llm"])
-            base_url = deps.get("base_url", DEFAULTS["base_url"])
+#             llm_model = deps.get("llm", DEFAULTS["llm"])
+#             base_url = deps.get("base_url", DEFAULTS["base_url"])
             
-            def on_progress(msg):
-                emit(deps, "gather_context", f"🌐 {msg}")
+#             def on_progress(msg):
+#                 emit(deps, "gather_context", f"🌐 {msg}")
             
-            search_result = await search_and_synthesize(
-                query=query,
-                context=context.get("rag", ""),
-                llm_model=llm_model,
-                base_url=base_url,
-                on_progress=on_progress
-            )
+#             search_result = await search_and_synthesize(
+#                 query=query,
+#                 context=context.get("rag", ""),
+#                 llm_model=llm_model,
+#                 base_url=base_url,
+#                 on_progress=on_progress
+#             )
             
-            if search_result["results"]:
-                context["web"] = search_result["formatted_text"]
-                parts.append(f"[Web Research]\n{search_result['formatted_text']}")
+#             if search_result["results"]:
+#                 context["web"] = search_result["formatted_text"]
+#                 parts.append(f"[Web Research]\n{search_result['formatted_text']}")
                 
-                # Store in RAG
-                if rag and rag.enabled:
-                    web_results = [
-                        {
-                            "url": r.url,
-                            "title": r.title,
-                            "content": r.content,
-                            "score": r.score,
-                            "source": r.source,
-                            "enriched": "crawl4ai" in r.source.lower(),
-                            "query_used": r.query_used
-                        }
-                        for r in search_result["results"]
-                    ]
-                    rag.add_web_search_batch(
-                        query=query,
-                        results=web_results,
-                        stage_name=stage_name,
-                        workflow_id=workflow_id,
-                    )
+#                 # Store in RAG
+#                 if rag and rag.enabled:
+#                     web_results = [
+#                         {
+#                             "url": r.url,
+#                             "title": r.title,
+#                             "content": r.content,
+#                             "score": r.score,
+#                             "source": r.source,
+#                             "enriched": "crawl4ai" in r.source.lower(),
+#                             "query_used": r.query_used
+#                         }
+#                         for r in search_result["results"]
+#                     ]
+#                     rag.add_web_search_batch(
+#                         query=query,
+#                         results=web_results,
+#                         stage_name=stage_name,
+#                         workflow_id=workflow_id,
+#                     )
                     
-                logger.info(f"🌐 Web: {len(search_result['results'])} results")
+#                 logger.info(f"🌐 Web: {len(search_result['results'])} results")
                 
-        except Exception as e:
-            logger.warning(f"Web search failed: {e}")
+#         except Exception as e:
+#             logger.warning(f"Web search failed: {e}")
     
-    # 3. Existing Outputs
-    output_manager = deps.get("output_manager")
-    if output_manager and stage_name:
-        try:
-            stage_dir = output_manager.get_stage_dir(stage_name)
+#     # 3. Existing Outputs
+#     output_manager = deps.get("output_manager")
+#     if output_manager and stage_name:
+#         try:
+#             stage_dir = output_manager.get_stage_dir(stage_name)
             
-            # List available files
-            file_tools = WorkflowFileTools(output_manager.workflow_dir)
-            stage_files = file_tools.get_stage_files(stage_name)
+#             # List available files
+#             file_tools = WorkflowFileTools(output_manager.workflow_dir)
+#             stage_files = file_tools.get_stage_files(stage_name)
             
-            if stage_files["plots"]:
-                context["plots"] = [f.path for f in stage_files["plots"]]
-                parts.append(f"[Existing Plots: {len(stage_files['plots'])}]")
-                emit(deps, "gather_context", f"📊 Found {len(stage_files['plots'])} plots")
+#             if stage_files["plots"]:
+#                 context["plots"] = [f.path for f in stage_files["plots"]]
+#                 parts.append(f"[Existing Plots: {len(stage_files['plots'])}]")
+#                 emit(deps, "gather_context", f"📊 Found {len(stage_files['plots'])} plots")
             
-            # Get latest console output
-            latest_output = file_tools.get_latest_output(stage_name)
-            if latest_output:
-                context["outputs"] = latest_output[:1500]
-                parts.append(f"[Previous Output]\n{latest_output[:1000]}")
+#             # Get latest console output
+#             latest_output = file_tools.get_latest_output(stage_name)
+#             if latest_output:
+#                 context["outputs"] = latest_output[:1500]
+#                 parts.append(f"[Previous Output]\n{latest_output[:1000]}")
                 
-        except Exception as e:
-            logger.warning(f"Output check failed: {e}")
+#         except Exception as e:
+#             logger.warning(f"Output check failed: {e}")
     
-    context["combined"] = "\n\n".join(parts) if parts else "No prior context."
+#     context["combined"] = "\n\n".join(parts) if parts else "No prior context."
     
-    if emitter:
-        emitter.stage_end("gather_context", success=True)
+#     if emitter:
+#         emitter.stage_end("gather_context", success=True)
     
-    logger.info(f"📦 Context: {len(context['combined'])} chars")
+#     logger.info(f"📦 Context: {len(context['combined'])} chars")
     
-    return {"context": context}
+#     return {"context": context}
 
 
 # =============================================================================

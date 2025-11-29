@@ -1,47 +1,35 @@
 """
 AI Workflow Module
 
-Two workflow versions available:
+Workflows:
+- workflow (v2): Full workflow with verification loop
+- simple_workflow: Faster workflow without verification
 
-1. workflow (v2): Full workflow with verification loop
-   gather_context → plan → (execute|answer) → plot_analysis → summarize → verify → (done|retry)
-
-2. simple_workflow: Faster workflow without verification
-   gather_context → plan → (execute|answer) → summarize
-
-Usage:
-    from ai import workflow, State, Deps
-    
-    result = await workflow.ainvoke(
-        {"messages": [...], "data_path": "...", ...},
-        context=Deps(executor=..., output_manager=...)
-    )
-    
 Components:
-    - factory: Node factory for custom nodes
-    - tools: File search tools for code agent
-    - routing: Dynamic routing decisions
-    - verification: Output completeness checking
+- RAGSearchAgent: Intelligent RAG search with query refinement
+- NodeFactory: Custom node creation
+- DynamicRouter: Workflow routing decisions
 """
 
-# V2 (recommended)
+# State and config
 from .state_v2 import State, Deps, Context, DEFAULTS
+
+# Workflows
 from .workflow_v2 import workflow, simple_workflow, build_workflow_v2, build_simple_workflow
 
-# Factory and components
+# Factory
 from .factory import NodeFactory, NodeConfig
 
-# Legacy support - import conditionally to avoid circular imports
-try:
-    from .workflow import workflow as workflow_v1
-except ImportError:
-    workflow_v1 = None
+# RAG Agent
+from .rag_agent import RAGSearchAgent, RAGAgentConfig, RAGSearchResult, search_rag_with_agent
+
+# Integration helpers
+from .rag_agent_integration import gather_context_with_agent, gather_rag_context
 
 __all__ = [
     # Workflows
     "workflow",
     "simple_workflow",
-    "workflow_v1",
     "build_workflow_v2",
     "build_simple_workflow",
     
@@ -54,4 +42,12 @@ __all__ = [
     # Factory
     "NodeFactory",
     "NodeConfig",
+    
+    # RAG Agent
+    "RAGSearchAgent",
+    "RAGAgentConfig",
+    "RAGSearchResult",
+    "search_rag_with_agent",
+    "gather_context_with_agent",
+    "gather_rag_context",
 ]
