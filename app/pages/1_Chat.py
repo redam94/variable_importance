@@ -422,7 +422,8 @@ if prompt := st.chat_input("Ask about your data..."):
     # Start task
     with st.chat_message("assistant"):
         with st.spinner("🧠 Starting..."):
-            from ai import workflow, Deps
+            from ai import Deps
+            from ai.workflow_v2 import workflow
             from utils.progress_events import get_emitter
             
             # Create unique task ID
