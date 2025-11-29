@@ -594,7 +594,7 @@ class ContextRAG:
         cleaned = {}
         for key, value in metadata.items():
             if value is None:
-                cleaned[key] = None
+                cleaned[key] = 'N/A'
             elif isinstance(value, (str, int, float, bool)):
                 cleaned[key] = value
             elif isinstance(value, list):
@@ -611,7 +611,29 @@ class ContextRAG:
                 cleaned[key] = str(value)
         
         return cleaned
-    
+    def _process_batch(self, batch, doc_type: str) -> None:
+        """Process and add a batch of chunks to the collection."""
+        documents = []
+        metadatas = []
+        ids = []
+        
+        for chunk in batch:
+            chunk_text = chunk["text"]
+            chunk_metadata = self._clean_metadata(chunk["metadata"])
+            chunk_id = self._generate_id(chunk_text, doc_type, chunk["metadata"]["chunk_index"])
+            
+            documents.append(chunk_text)
+            metadatas.append(chunk_metadata)
+            ids.append(chunk_id)
+        
+        logger.debug(f"Adding {len(documents)} chunks to collection '{self.collection.name}'")
+        logger.debug(f"Sample metadata: {metadatas[0] if metadatas else 'N/A'}")
+        self.collection.add(
+            documents=documents,
+            metadatas=metadatas,
+            ids=ids
+        )
+
     def _add_chunks_to_collection(
         self,
         chunks: List[Dict[str, Any]],
@@ -620,27 +642,15 @@ class ContextRAG:
         """Helper to add chunks to collection."""
         if not chunks:
             return
+        MAX_BATCH_SIZE = 1000
+        for i in range(0, len(chunks), MAX_BATCH_SIZE):
+            batch = chunks[i:i + MAX_BATCH_SIZE]
+            self._process_batch(batch, doc_type)
         
-        documents = []
-        metadatas = []
-        ids = []
+        remaining = chunks[len(chunks) - (len(chunks) % MAX_BATCH_SIZE):]
+        if remaining:
+            self._process_batch(remaining, doc_type)
         
-        for chunk in chunks:
-            chunk_text = chunk["text"]
-            chunk_metadata = self._clean_metadata(chunk["metadata"])
-            chunk_metadata['section'] = chunk_metadata.get('section', 'N/A') if chunk_metadata.get('section') else 'N/A'
-            chunk_id = self._generate_id(chunk_text, doc_type, chunk["metadata"]["chunk_index"])
-            
-            documents.append(chunk_text)
-            metadatas.append(chunk_metadata)
-            ids.append(chunk_id)
-        logger.debug(f"Adding {len(documents)} chunks to collection '{self.collection.name}'")
-        logger.debug(f"Sample metadata: {metadatas[0] if metadatas else 'N/A'}")
-        self.collection.add(
-            documents=documents,
-            metadatas=metadatas,
-            ids=ids
-        )
     
     def add_plot_analysis(
         self,

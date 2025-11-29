@@ -146,7 +146,7 @@ REQUIREMENTS:
 - Use layout="multi_image" for comparison slides with 2-3 images
 - Use layout="content" for text-heavy explanation slides
 - Use layout="two_column" for side-by-side comparisons
-- Keep bullet points to 3-5 per slide maximum
+- Keep bullet points to 3-10 per slide
 - Be specific and data-driven in the content
 
 {f"ADDITIONAL INSTRUCTIONS: {custom_instructions}" if custom_instructions else ""}
@@ -157,7 +157,7 @@ Return the structured outline."""
         
         try:
             outline = structured_llm.invoke([
-                SystemMessage(content="You are a presentation designer. Create clear, data-driven slide structures based on the analysis context provided."),
+                SystemMessage(content="You are an expert data analyst designing a presentation. Create clear, data-driven slide structures based on the analysis context provided. Use engaging titles and provide analysis and interpretation in the bullet points."),
                 HumanMessage(content=prompt)
             ])
             
@@ -266,8 +266,6 @@ For each slide, list which plots (if any) should appear on it."""
             
         except Exception as e:
             logger.error(f"Plot matching failed: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
             return {}
     
     async def create_presentation(
@@ -278,9 +276,21 @@ For each slide, list which plots (if any) should appear on it."""
         num_slides: int = 6,
         custom_instructions: str = "",
         output_path: Optional[str] = None,
+        color_primary: Optional[str] = None,
+        color_accent: Optional[str] = None,
     ) -> GeneratedPresentation:
         """
         Full pipeline: plan → match plots → build presentation.
+        
+        Args:
+            topic: Presentation topic/title
+            workflow_id: Workflow ID for context
+            stage_name: Stage containing plots
+            num_slides: Target number of slides
+            custom_instructions: Additional generation instructions
+            output_path: Where to save the PPTX
+            color_primary: Override primary color (hex without #)
+            color_accent: Override accent color (hex without #)
         """
         self._emit("Starting presentation generation...")
         
@@ -304,7 +314,15 @@ For each slide, list which plots (if any) should appear on it."""
         # Create plot path lookup
         plot_paths = {p.name: p.path for p in plots}
         
-        # Step 3: Determine output path
+        # Step 3: Apply user-selected theme colors (override LLM defaults)
+        if color_primary:
+            outline.color_primary = color_primary.lstrip('#')
+        if color_accent:
+            outline.color_accent = color_accent.lstrip('#')
+        
+        self._emit(f"Using colors: primary=#{outline.color_primary}, accent=#{outline.color_accent}")
+        
+        # Step 4: Determine output path
         if output_path is None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             if self.output_manager:
@@ -314,7 +332,7 @@ For each slide, list which plots (if any) should appear on it."""
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = str(output_dir / f"presentation_{timestamp}.pptx")
         
-        # Step 4: Build PPTX
+        # Step 5: Build PPTX
         from .builder import PresentationBuilder
         
         builder = PresentationBuilder(progress_callback=self.progress_callback)

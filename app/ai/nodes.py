@@ -359,7 +359,7 @@ Context:
 Requirements:
 - Load: pd.read_csv('{data_path.name}')
 - Use matplotlib with 'Agg' backend
-- Save plots with descriptive names (plt.savefig)
+- Save plots with descriptive names (plt.savefig) use a dpi of 300
 - Print key findings to stdout
 - Raise exceptions on errors with clear messages
 - Be sure to raise errors if any issues occur

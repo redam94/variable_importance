@@ -167,8 +167,8 @@ if st.button("🚀 Generate Presentation", type="primary", use_container_width=T
             elif "slide" in msg_lower:
                 # Increment for each slide
                 current = progress_bar._value if hasattr(progress_bar, '_value') else 0.55
-                if isinstance(current, (int, float)):
-                    progress_bar.progress(min(0.9, current + 0.05))
+                current = current if isinstance(current, (float, int)) else 0.55
+                progress_bar.progress(min(0.9, current + 0.05))
             elif "saved" in msg_lower:
                 progress_bar.progress(1.0)
         
@@ -189,6 +189,8 @@ if st.button("🚀 Generate Presentation", type="primary", use_container_width=T
                     stage_name=selected_stage,
                     num_slides=num_slides,
                     custom_instructions=custom_instructions or "",
+                    color_primary=selected_theme["primary"],
+                    color_accent=selected_theme["accent"],
                 ))
                 
                 progress_bar.progress(1.0)

@@ -46,6 +46,7 @@ class SessionPersistence:
             "model_selector",
             "workflow_id_input",
             "stage_name_input",
+            
             # Add any other widget keys here
         }
     
@@ -108,6 +109,10 @@ class SessionPersistence:
             
             for key, value in session_state.items():
                 if key in exclude_keys:
+                    continue
+                if 'del_' in key.lower():
+                    continue
+                if 'load_' in key.lower():
                     continue
                 
                 # Try to JSON serialize

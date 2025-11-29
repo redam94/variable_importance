@@ -66,7 +66,7 @@ with st.sidebar:
             url = "http://100.91.155.118:11434/v1/models"
             response = httpx.get(url, timeout=5.0)
             if response.status_code == 200:
-                return [model['id'] for model in response.json()['data']]
+                return [model['id'] for model in response.json()['data'] if 'embedding' not in model['id'].lower()]
         except:
             pass
         return ["qwen3:30b"]
