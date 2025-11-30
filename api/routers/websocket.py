@@ -34,6 +34,10 @@ class Connection:
     workflow_id: str
     connected_at: datetime = field(default_factory=datetime.now)
 
+    def __hash__(self):
+        return hash((self.websocket, self.user.username if self.user else None, self.workflow_id))
+
+
 
 class ConnectionManager:
     """
