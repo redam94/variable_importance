@@ -88,6 +88,14 @@ frontend = [
 dev = [
     "variable-importance",
 ]
+api = [
+    "bcrypt==4.3.0",
+    "fastapi>=0.121.3",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.20",
+    "uvicorn>=0.38.0",
+]
 
 [project.scripts]
 variable-importance = "variable_importance.main:main"
