@@ -17,6 +17,73 @@ from datetime import datetime
 from pydantic import BaseModel
 from loguru import logger
 
+MATPLOTLIB_STYLE_SETUP = '''
+# Auto-generated: Configure matplotlib styling
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+from cycler import cycler
+
+# Professional color palette
+_PALETTE = [
+    "#667eea", "#48bb78", "#ed8936", "#f56565", "#38b2ac",
+    "#9f7aea", "#ed64a6", "#4299e1", "#ecc94b", "#718096",
+]
+
+# Apply professional styling
+_style = {{
+    "figure.figsize": (10, 6),
+    "figure.dpi": 150,
+    "figure.facecolor": "white",
+    "figure.autolayout": True,
+    "axes.facecolor": "white",
+    "axes.edgecolor": "#718096",
+    "axes.linewidth": 0.8,
+    "axes.grid": True,
+    "axes.axisbelow": True,
+    "axes.labelsize": 11,
+    "axes.labelcolor": "#2d3748",
+    "axes.labelweight": "medium",
+    "axes.titlesize": 13,
+    "axes.titleweight": "semibold",
+    "axes.titlecolor": "#2d3748",
+    "axes.titlepad": 12,
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.prop_cycle": cycler("color", _PALETTE),
+    "grid.color": "#e2e8f0",
+    "grid.linewidth": 0.5,
+    "grid.alpha": 0.7,
+    "lines.linewidth": 2,
+    "lines.markersize": 6,
+    "patch.linewidth": 0,
+    "legend.frameon": True,
+    "legend.framealpha": 0.95,
+    "legend.facecolor": "white",
+    "legend.edgecolor": "#e2e8f0",
+    "legend.fontsize": 10,
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "xtick.color": "#718096",
+    "ytick.color": "#718096",
+    "font.family": "sans-serif",
+    "font.size": 10,
+    "savefig.dpi": 300,
+    "savefig.facecolor": "white",
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.15,
+}}
+for _k, _v in _style.items():
+    try:
+        mpl.rcParams[_k] = _v
+    except KeyError:
+        pass
+
+import os
+os.chdir('{working_dir}')
+
+'''
 
 class ExecutionResult(BaseModel):
     """Result of code execution with comprehensive output tracking"""
@@ -166,6 +233,7 @@ class OutputCapturingExecutor:
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             logger.error(f"❌ Execution error: {str(e)}")
+            logger.debug(e, exc_info=True)
             
             return ExecutionResult(
                 success=False,
@@ -225,19 +293,11 @@ except Exception as e:
         Add matplotlib configuration to save plots automatically.
         """
         # Ensure absolute path
+        from pathlib import Path
         working_dir = Path(working_dir).resolve()
         
-        setup_code = f"""
-# Auto-generated: Configure matplotlib for non-interactive backend
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend
-import matplotlib.pyplot as plt
-
-# Set working directory
-import os
-os.chdir('{working_dir}')
-
-"""
+        setup_code = MATPLOTLIB_STYLE_SETUP.format(working_dir=working_dir)
+        logger.info(setup_code)
         return setup_code + code
     
     def _truncate_output(self, text: str) -> str:
@@ -337,7 +397,7 @@ os.chdir('{working_dir}')
 async def test_executor():
     """Test the output capturing executor"""
     
-    from .output_manager import OutputManager
+    from variable_importance.utils.output_manager import OutputManager
 
     print("\n" + "="*70)
     print("TESTING OUTPUT CAPTURING EXECUTOR")
