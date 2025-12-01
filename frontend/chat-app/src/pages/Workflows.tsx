@@ -6,7 +6,6 @@ import {
   FolderOpen,
   RefreshCw,
   Check,
-  Calendar,
   Layers,
   FileOutput,
   Search,
