@@ -21,8 +21,8 @@ import time
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from session_utils import init_session_state
-from utils.background_tasks import get_task_manager, TaskStatus
-from utils.progress_events import get_reader, ProgressReader
+from variable_importance.utils.background_tasks import get_task_manager, TaskStatus
+from variable_importance.utils.progress_events import get_reader, ProgressReader
 from session_persistence import save_streamlit_session
 from langchain.messages import HumanMessage, AIMessage
 

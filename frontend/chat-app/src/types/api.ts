@@ -49,9 +49,24 @@ export interface WorkflowMessage {
 export interface WorkflowResponse {
   workflow_id: string
   stage_name: string
+  status: string
   message: WorkflowMessage
+  action_taken?: string
+  code_executed?: string
+  plots?: string[]
+  summary?: string
+  error?: string
   artifacts: string[]
   execution_time_seconds: number
+}
+
+export interface DataFileUploadResponse {
+  success: boolean
+  filename: string
+  file_path: string
+  file_size: number
+  content_type: string
+  message: string
 }
 
 export interface WorkflowStatus {
@@ -202,4 +217,13 @@ export interface ErrorResponse {
 export interface Workflow {
   workflow_id: string
   stage_count: number
+}
+
+export interface DataFileUploadResponse {
+  success: boolean
+  filename: string
+  file_path: string
+  file_size: number
+  content_type: string
+  message: string
 }

@@ -8,6 +8,10 @@ Provides:
 """
 
 import asyncio
+import tempfile
+import uuid
+from pathlib import Path
+from fastapi import UploadFile, File
 from datetime import datetime
 from typing import Optional, Dict, Any, Annotated
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
@@ -21,6 +25,7 @@ from schemas import (
     WorkflowMessage,
     WorkflowStatus,
     ErrorResponse,
+    DataFileUploadResponse
 )
 from dependencies import (
     RAGManager,
@@ -41,6 +46,112 @@ router = APIRouter(prefix="/workflow", tags=["Workflow"])
 # Task tracking
 _running_tasks: Dict[str, Dict[str, Any]] = {}
 
+
+TEMP_DATA_DIR = Path(tempfile.gettempdir()) / "workflow_data"
+TEMP_DATA_DIR.mkdir(exist_ok=True)
+
+# Supported data file extensions
+SUPPORTED_DATA_EXTENSIONS = {".csv", ".xlsx", ".xls", ".json", ".parquet", ".tsv"}
+
+# =============================================================================
+# DATA FILE UPLOAD
+# =============================================================================
+
+@router.post(
+    "/upload-data",
+    response_model=DataFileUploadResponse,
+    summary="Upload data file for workflow analysis",
+    description="Upload a data file (CSV, Excel, JSON, Parquet) and get a temporary path for use in workflow execution.",
+)
+async def upload_data_file(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    file: UploadFile = File(..., description="Data file to upload"),
+) -> DataFileUploadResponse:
+    """
+    Upload a data file and return a temporary path for workflow use.
+    
+    The returned `file_path` can be used as the `data_path` argument
+    in the `/workflow/run` endpoint.
+    
+    Supported formats:
+    - CSV (.csv)
+    - TSV (.tsv)
+    - Excel (.xlsx, .xls)
+    - JSON (.json)
+    - Parquet (.parquet)
+    
+    Files are stored temporarily and may be cleaned up periodically.
+    """
+    filename = file.filename or "data_file"
+    extension = Path(filename).suffix.lower()
+    
+    # Validate file type
+    if extension not in SUPPORTED_DATA_EXTENSIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {extension}. Supported: {', '.join(sorted(SUPPORTED_DATA_EXTENSIONS))}"
+        )
+    
+    # Create unique subdirectory for this upload
+    upload_id = uuid.uuid4().hex[:12]
+    upload_dir = TEMP_DATA_DIR / upload_id
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save file
+    file_path = upload_dir / filename
+    
+    try:
+        content = await file.read()
+        file_size = len(content)
+        
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        logger.info(f"📁 Data file uploaded: {file_path} ({file_size} bytes)")
+        
+        return DataFileUploadResponse(
+            success=True,
+            filename=filename,
+            file_path=str(file_path),
+            file_size=file_size,
+            content_type=file.content_type or "application/octet-stream",
+            message=f"File uploaded successfully. Use this path as data_path in /workflow/run"
+        )
+        
+    except Exception as e:
+        # Clean up on failure
+        if upload_dir.exists():
+            import shutil
+            shutil.rmtree(upload_dir, ignore_errors=True)
+        
+        logger.error(f"❌ Data file upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+@router.delete(
+    "/data/{upload_id}",
+    summary="Delete uploaded data file",
+    description="Clean up a previously uploaded data file.",
+)
+async def delete_data_file(
+    upload_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+) -> dict:
+    """Delete an uploaded data file by its upload ID."""
+    import shutil
+    
+    upload_dir = TEMP_DATA_DIR / upload_id
+    
+    if not upload_dir.exists():
+        raise HTTPException(status_code=404, detail="Upload not found")
+    
+    try:
+        shutil.rmtree(upload_dir)
+        logger.info(f"🗑️ Deleted upload: {upload_id}")
+        return {"success": True, "message": f"Upload {upload_id} deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
+    
 
 # =============================================================================
 # WORKFLOW EXECUTION

@@ -4,8 +4,8 @@ import { ProtectedRoute } from './components/layout/ProtectedRoute'
 import { LoginPage } from './pages/Login'
 import { RegisterPage } from './pages/Register'
 import { DashboardPage } from './pages/Dashboard'
-import { ChatPage } from './pages/Chat'
-import { AgentChatPage } from './pages/agentChat'
+import { WorkflowChatPage } from './pages/Chat'
+import { AgentChatPage } from './pages/AgentChat'
 import { DocumentsPage } from './pages/Documents'
 import { WorkflowsPage } from './pages/Workflows'
 import { RAGSearchPage } from './pages/RAGSearch'
@@ -27,7 +27,7 @@ export default function App() {
           }
         >
           <Route path="/" element={<DashboardPage />} />
-          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat" element={<WorkflowChatPage />} />
           <Route path="/agent" element={<AgentChatPage />} />
           <Route path="/documents" element={<DocumentsPage />} />
           <Route path="/workflows" element={<WorkflowsPage />} />

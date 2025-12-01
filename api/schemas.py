@@ -35,6 +35,28 @@ class DocumentSourceType(str, Enum):
 # WORKFLOW SCHEMAS
 # =============================================================================
 
+class DataFileUploadResponse(BaseModel):
+    """Response after uploading a data file for workflow analysis."""
+    
+    success: bool
+    filename: str
+    file_path: str = Field(..., description="Temporary path to use as data_path in workflow")
+    file_size: int
+    content_type: str
+    message: str
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "success": True,
+                "filename": "sales_data.csv",
+                "file_path": "/tmp/workflow_data/abc123/sales_data.csv",
+                "file_size": 1024,
+                "content_type": "text/csv",
+                "message": "File uploaded successfully"
+            }
+        }
+    }
 
 class WorkflowRequest(BaseModel):
     """Request to run the workflow."""

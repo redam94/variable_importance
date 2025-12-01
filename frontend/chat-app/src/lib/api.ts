@@ -15,6 +15,7 @@ import type {
   HealthResponse,
   Document,
   Workflow,
+  DataFileUploadResponse,
 } from '../types/api'
 
 const API_BASE = '/api'
@@ -207,6 +208,54 @@ export const workflowApi = {
   
   async listWorkflows(): Promise<Workflow[]> {
     return apiFetch<Workflow[]>('/workflow/list')
+  },
+  
+  async uploadData(
+    file: File,
+    onProgress?: (progress: number) => void
+  ): Promise<DataFileUploadResponse> {
+    const formData = new FormData()
+    formData.append('file', file)
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest()
+
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && onProgress) {
+          onProgress((event.loaded / event.total) * 100)
+        }
+      }
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText))
+        } else {
+          try {
+            const error = JSON.parse(xhr.responseText)
+            reject(new Error(error.detail || 'Upload failed'))
+          } catch {
+            reject(new Error('Upload failed'))
+          }
+        }
+      }
+
+      xhr.onerror = () => reject(new Error('Network error'))
+
+      xhr.open('POST', `${API_BASE}/workflow/upload-data`)
+
+      const token = getStoredToken()
+      if (token) {
+        xhr.setRequestHeader('Authorization', `Bearer ${token}`)
+      }
+
+      xhr.send(formData)
+    })
+  },
+
+  async deleteData(uploadId: string): Promise<{ success: boolean; message: string }> {
+    return apiFetch(`/workflow/data/${uploadId}`, {
+      method: 'DELETE',
+    })
   },
 }
 

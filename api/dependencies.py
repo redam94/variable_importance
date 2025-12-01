@@ -131,7 +131,7 @@ class WorkflowManager:
                     OutputCapturingExecutor,
                 )
 
-                cls._executor = OutputCapturingExecutor(timeout=120)
+                cls._executor = OutputCapturingExecutor(timeout_seconds=120)
                 logger.info("✅ Executor initialized")
             except ImportError as e:
                 logger.error(f"Failed to import executor: {e}")
