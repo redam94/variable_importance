@@ -283,84 +283,84 @@ async def run_workflow(
 # =============================================================================
 
 
-@router.post(
-    "/run-async",
-    response_model=WorkflowStatus,
-    summary="Start workflow asynchronously",
-    description="Start workflow in background and return task ID for status polling.",
-)
-async def run_workflow_async(
-    request: WorkflowRequest,
-    background_tasks: BackgroundTasks,
-    current_user: Annotated[User, Depends(get_current_active_user)],
-) -> WorkflowStatus:
-    """
-    Start workflow execution in background.
+# @router.post(
+#     "/run-async",
+#     response_model=WorkflowStatus,
+#     summary="Start workflow asynchronously",
+#     description="Start workflow in background and return task ID for status polling.",
+# )
+# async def run_workflow_async(
+#     request: WorkflowRequest,
+#     background_tasks: BackgroundTasks,
+#     current_user: Annotated[User, Depends(get_current_active_user)],
+# ) -> WorkflowStatus:
+#     """
+#     Start workflow execution in background.
 
-    Returns task ID for polling status via /workflow/status/{task_id}
+#     Returns task ID for polling status via /workflow/status/{task_id}
 
-    Requires authentication.
-    """
-    task_id = f"{request.workflow_id}_{request.stage_name}_{datetime.now().strftime('%H%M%S%f')}"
+#     Requires authentication.
+#     """
+#     task_id = f"{request.workflow_id}_{request.stage_name}_{datetime.now().strftime('%H%M%S%f')}"
 
-    # Initialize task tracking
-    _running_tasks[task_id] = {
-        "workflow_id": request.workflow_id,
-        "stage_name": request.stage_name,
-        "status": "starting",
-        "current_node": None,
-        "progress": 0.0,
-        "start_time": datetime.now(),
-        "result": None,
-        "error": None,
-    }
+#     # Initialize task tracking
+#     _running_tasks[task_id] = {
+#         "workflow_id": request.workflow_id,
+#         "stage_name": request.stage_name,
+#         "status": "starting",
+#         "current_node": None,
+#         "progress": 0.0,
+#         "start_time": datetime.now(),
+#         "result": None,
+#         "error": None,
+#     }
 
-    async def run_in_background():
-        try:
-            _running_tasks[task_id]["status"] = "running"
+#     async def run_in_background():
+#         try:
+#             _running_tasks[task_id]["status"] = "running"
 
-            # Run workflow (reuse logic from run_workflow)
-            workflow = WorkflowManager.get_workflow()
-            executor = WorkflowManager.get_executor()
-            output_mgr = OutputManagerRegistry.get_output_manager(request.workflow_id)
-            rag = await RAGManager.get_rag(request.workflow_id)
+#             # Run workflow (reuse logic from run_workflow)
+#             workflow = WorkflowManager.get_workflow()
+#             executor = WorkflowManager.get_executor()
+#             output_mgr = OutputManagerRegistry.get_output_manager(request.workflow_id)
+#             rag = await RAGManager.get_rag(request.workflow_id)
 
-            initial_state = {
-                "messages": [HumanMessage(content=request.query)],
-                "data_path": request.data_path or "",
-                "stage_name": request.stage_name,
-                "workflow_id": request.workflow_id,
-                "web_search_enabled": request.web_search_enabled,
-            }
+#             initial_state = {
+#                 "messages": [HumanMessage(content=request.query)],
+#                 "data_path": request.data_path or "",
+#                 "stage_name": request.stage_name,
+#                 "workflow_id": request.workflow_id,
+#                 "web_search_enabled": request.web_search_enabled,
+#             }
 
-            deps = {
-                "executor": executor,
-                "output_manager": output_mgr,
-                "rag": rag,
-                "llm": settings.DEFAULT_MODEL,
-                "base_url": settings.OLLAMA_BASE_URL,
-            }
+#             deps = {
+#                 "executor": executor,
+#                 "output_manager": output_mgr,
+#                 "rag": rag,
+#                 "llm": settings.DEFAULT_MODEL,
+#                 "base_url": settings.OLLAMA_BASE_URL,
+#             }
 
-            result = await workflow.ainvoke(initial_state, context=deps)
+#             result = await workflow.ainvoke(initial_state, context=deps)
 
-            _running_tasks[task_id]["status"] = "completed"
-            _running_tasks[task_id]["result"] = result
-            _running_tasks[task_id]["progress"] = 1.0
+#             _running_tasks[task_id]["status"] = "completed"
+#             _running_tasks[task_id]["result"] = result
+#             _running_tasks[task_id]["progress"] = 1.0
 
-        except Exception as e:
-            _running_tasks[task_id]["status"] = "error"
-            _running_tasks[task_id]["error"] = str(e)
-            logger.error(f"Background task {task_id} failed: {e}")
+#         except Exception as e:
+#             _running_tasks[task_id]["status"] = "error"
+#             _running_tasks[task_id]["error"] = str(e)
+#             logger.error(f"Background task {task_id} failed: {e}")
 
-    # Schedule background execution
-    background_tasks.add_task(run_in_background)
+#     # Schedule background execution
+#     background_tasks.add_task(run_in_background)
 
-    return WorkflowStatus(
-        workflow_id=request.workflow_id,
-        stage_name=request.stage_name,
-        status="starting",
-        progress=0.0,
-    )
+#     return WorkflowStatus(
+#         workflow_id=request.workflow_id,
+#         stage_name=request.stage_name,
+#         status="starting",
+#         progress=0.0,
+#     )
 
 
 @router.get(

@@ -1,14 +1,13 @@
 """
-RAG Agent Integration for gather_context node.
+RAG Agent Integration with Emitter - Updated gather_rag_context.
 
-This module provides the updated gather_context implementation
-that uses the RAG search agent instead of simple queries.
-
-Replace the RAG section in nodes_v2.py gather_context with this implementation.
+Shows how the RAG agent emits events through the workflow emitter
+for real-time display in the frontend.
 """
 
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional
 from loguru import logger
+import asyncio
 
 from .rag_agent import RAGSearchAgent, RAGAgentConfig, search_rag_with_agent
 from .state import State, Deps, Context, DEFAULTS
@@ -19,48 +18,55 @@ async def gather_rag_context(
     rag,
     workflow_id: str,
     deps: Deps,
-    emit_fn: Optional[callable] = None,
 ) -> Dict[str, Any]:
     """
-    Gather RAG context using the intelligent search agent.
+    Gather RAG context using intelligent search agent with emitter integration.
     
-    Args:
-        query: User query
-        rag: ContextRAG instance
-        workflow_id: Current workflow ID
-        deps: Runtime dependencies
-        emit_fn: Progress emission function
-        
-    Returns:
-        Dict with 'rag_context', 'doc_context', 'search_result'
+    The emitter is retrieved from deps and used to emit events that
+    the frontend displays in collapsible RAG message groups.
     """
     if not rag or not rag.enabled:
         return {"rag_context": "", "doc_context": "", "search_result": None}
     
-    # Configure agent
+    # Get emitter from deps (injected by workflow runner)
+    emitter = deps.get("emitter")
+    stage = "gather_context"
+    
     config = RAGAgentConfig(
         max_iterations=10,
         relevance_threshold=0.6,
-        relevance_weight=0.6,
-        recency_weight=0.4,
         max_chunks_per_query=10,
         max_total_chunks=20,
         max_context_chars=3000,
-        recency_decay_days=30,
     )
     
     llm_model = deps.get("llm", DEFAULTS["llm"])
     base_url = deps.get("base_url", DEFAULTS["base_url"])
     
-    def on_progress(msg: str):
-        if emit_fn:
-            emit_fn(f"📚 {msg}")
-        logger.debug(f"RAG Agent: {msg}")
-    
     try:
-        if emit_fn:
-            emit_fn("📚 Starting intelligent RAG search...")
+        # Signal RAG search start
+        if emitter:
+            await emitter.rag_search_start(stage)
         
+        # Create progress callback that emits events
+        iteration_count = [0]  # Use list for mutation in closure
+        
+        def on_progress(msg: str, query_text: str = "", chunks: int = 0, relevance: float = None):
+            """Emit progress through the workflow emitter."""
+            iteration_count[0] += 1
+            
+            if emitter and query_text:
+                asyncio.run(emitter.rag_query(
+                    stage=stage,
+                    query=query_text,
+                    iteration=iteration_count[0],
+                    chunks_found=chunks,
+                    relevance=relevance,
+                ))
+            
+            logger.debug(f"RAG Agent: {msg}")
+        
+        # Run the agent search
         result = await search_rag_with_agent(
             query=query,
             rag=rag,
@@ -72,24 +78,26 @@ async def gather_rag_context(
             on_progress=on_progress,
         )
         
-        rag_context = result.context if result.accepted else ""
-        
-        if emit_fn:
-            status = "✅" if result.accepted else "⚠️"
-            emit_fn(
-                f"{status} RAG: {result.total_chunks_found} chunks, "
-                f"relevance {result.final_relevance:.2f}, "
-                f"{result.iterations} iterations"
+        # Signal RAG search complete
+        if emitter:
+            await emitter.rag_search_end(
+                stage=stage,
+                total_iterations=result.iterations,
+                total_chunks=result.total_chunks_found,
+                final_relevance=result.final_relevance,
+                accepted=result.accepted,
             )
         
+        rag_context = result.context if result.accepted else ""
+        
         logger.info(
-            f"📚 RAG Agent: {result.total_chunks_found} chunks found, "
+            f"📚 RAG Agent: {result.total_chunks_found} chunks, "
             f"relevance={result.final_relevance:.2f}, "
             f"accepted={result.accepted}"
         )
         
-        # Also query documents separately for focused retrieval
-        doc_context = await _query_documents(query, rag, workflow_id, emit_fn)
+        # Query documents separately
+        doc_context = await _query_documents(query, rag, workflow_id, emitter)
         
         return {
             "rag_context": rag_context,
@@ -99,35 +107,35 @@ async def gather_rag_context(
         
     except Exception as e:
         logger.warning(f"RAG agent search failed: {e}")
-        # Fallback to simple search
-        return await _fallback_rag_search(query, rag, workflow_id, emit_fn)
+        
+        if emitter:
+            await emitter.error(stage, f"RAG search failed: {e}")
+        
+        return await _fallback_rag_search(query, rag, workflow_id, emitter)
 
 
 async def _query_documents(
     query: str,
     rag,
     workflow_id: str,
-    emit_fn: Optional[callable],
+    emitter,
 ) -> str:
     """Query uploaded documents separately."""
     try:
-        doc_results = rag.query_documents(
+        results = rag.query_documents(
             query=query,
             workflow_id=workflow_id,
             n_results=5,
         )
         
-        if not doc_results:
+        if not results:
             return ""
         
         doc_texts = []
-        for doc in doc_results:
-            title = doc["metadata"].get("title", "Document")
-            content = doc["document"][:500]
+        for r in results:
+            title = r.get("metadata", {}).get("title", "Document")
+            content = r.get("document", "")[:500]
             doc_texts.append(f"[{title}]: {content}")
-        
-        if emit_fn:
-            emit_fn(f"📄 Found {len(doc_results)} document chunks")
         
         return "\n\n".join(doc_texts)
         
@@ -140,21 +148,15 @@ async def _fallback_rag_search(
     query: str,
     rag,
     workflow_id: str,
-    emit_fn: Optional[callable],
+    emitter,
 ) -> Dict[str, Any]:
-    """Fallback to simple RAG search if agent fails."""
+    """Simple fallback when agent search fails."""
     try:
-        if emit_fn:
-            emit_fn("📚 Using fallback RAG search...")
-        
         rag_summary = rag.get_context_summary(
             query=query,
             workflow_id=workflow_id,
             max_tokens=1500,
         )
-        
-        if emit_fn and rag_summary:
-            emit_fn(f"📚 Fallback found {len(rag_summary)} chars")
         
         return {
             "rag_context": rag_summary or "",
@@ -162,8 +164,7 @@ async def _fallback_rag_search(
             "search_result": None,
         }
         
-    except Exception as e:
-        logger.error(f"Fallback RAG search failed: {e}")
+    except Exception:
         return {"rag_context": "", "doc_context": "", "search_result": None}
 
 
@@ -178,10 +179,10 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
     This is a drop-in replacement for the gather_context node.
     """
     deps = runtime.context
-    emitter = deps.get("progress_emitter")
+    emitter = deps.get("emitter")
     
     if emitter:
-        emitter.stage_start("gather_context", "Gathering context with RAG agent")
+        await emitter.stage_start("gather_context", "Gathering context with RAG agent")
     
     # Extract query
     messages = state.get("messages", [])
@@ -192,47 +193,43 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
     context = Context(rag="", web="", outputs="", plots=[], combined="")
     parts = []
     
-    def emit(msg: str):
-        if emitter:
-            from utils.progress_events import EventType
-            emitter.emit(EventType.PROGRESS, "gather_context", msg)
-    
-    # 1. RAG Context with Agent
+    # 1. RAG Context using agent
     rag = deps.get("rag")
-    rag_result = await gather_rag_context(
-        query=query,
-        rag=rag,
-        workflow_id=workflow_id,
-        deps=deps,
-        emit_fn=emit,
-    )
-    
-    if rag_result["rag_context"]:
-        context["rag"] = rag_result["rag_context"]
-        parts.append(f"[Previous Analysis]\n{rag_result['rag_context']}")
+    if rag and rag.enabled:
+        rag_result = await gather_rag_context(
+            query=query,
+            rag=rag,
+            workflow_id=workflow_id,
+            deps=deps,
+        )
         
-        if emitter:
-            emitter.rag_query("gather_context", len(rag_result["rag_context"].split("\n")))
-    
-    if rag_result["doc_context"]:
-        parts.append(f"[Reference Documents]\n{rag_result['doc_context']}")
-    
-    # 2. Web Search (unchanged from original)
+        if rag_result["rag_context"]:
+            context["rag"] = rag_result["rag_context"]
+            parts.append(f"[Previous Analysis]\n{rag_result['rag_context']}")
+        
+        if rag_result["doc_context"]:
+            parts.append(f"[Reference Documents]\n{rag_result['doc_context']}")
+
     if state.get("web_search_enabled"):
         try:
             from .web_search import search_and_synthesize
             
-            emit("🌐 Searching web...")
+            if emitter:
+                await emitter.stage_start("gather_context", "🌐 Searching web...")
             
             llm_model = deps.get("llm", DEFAULTS["llm"])
             base_url = deps.get("base_url", DEFAULTS["base_url"])
+            
+            def on_progress(msg):
+                if emitter:
+                    asyncio.run(emitter.stage_progress("gather_context", f"🌐 {msg}"))
             
             search_result = await search_and_synthesize(
                 query=query,
                 context=context.get("rag", ""),
                 llm_model=llm_model,
                 base_url=base_url,
-                on_progress=lambda msg: emit(f"🌐 {msg}"),
+                on_progress=on_progress
             )
             
             if search_result["results"]:
@@ -249,7 +246,7 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
                             "score": r.score,
                             "source": r.source,
                             "enriched": "crawl4ai" in r.source.lower(),
-                            "query_used": r.query_used,
+                            "query_used": r.query_used
                         }
                         for r in search_result["results"]
                     ]
@@ -259,54 +256,33 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
                         stage_name=stage_name,
                         workflow_id=workflow_id,
                     )
-                
+                    
                 logger.info(f"🌐 Web: {len(search_result['results'])} results")
-                
         except Exception as e:
             logger.warning(f"Web search failed: {e}")
-    
-    # 3. Existing Outputs (unchanged)
-    output_manager = deps.get("output_manager")
-    if output_manager:
+
+    # 3. Existing outputs
+    output_mgr = deps.get("output_manager")
+    if output_mgr:
         try:
-            emit("📁 Checking existing outputs...")
-            
-            existing = output_manager.get_all_outputs()
+            existing = output_mgr.get_stage_summary(stage_name)
             if existing:
-                output_parts = []
-                for stage, data in list(existing.items())[-3:]:
-                    if "stdout" in data and data["stdout"]:
-                        output_parts.append(f"[{stage}]\n{data['stdout'][:500]}")
+                context["outputs"] = existing
+                parts.append(f"[Existing Outputs]\n{existing}")
                 
-                if output_parts:
-                    outputs_text = "\n\n".join(output_parts)
-                    context["outputs"] = outputs_text
-                    parts.append(f"[Existing Outputs]\n{outputs_text}")
-                    
-                    emit(f"📁 Found {len(output_parts)} existing outputs")
-                    
+                # Get existing plots
+                plots = output_mgr.get_plots(stage_name)
+                if plots:
+                    context["plots"] = plots
         except Exception as e:
-            logger.warning(f"Output retrieval failed: {e}")
+            logger.warning(f"Output manager failed: {e}")
     
-    # 4. Plot paths (unchanged)
-    plot_cache = deps.get("plot_cache")
-    if plot_cache:
-        try:
-            plots = plot_cache.get_recent_plots(workflow_id, limit=5)
-            context["plots"] = [str(p) for p in plots]
-            
-            if plots:
-                emit(f"📊 Found {len(plots)} plots")
-                
-        except Exception as e:
-            logger.warning(f"Plot cache failed: {e}")
-    
-    # Combine context
+    # 3. Combine context
     context["combined"] = "\n\n---\n\n".join(parts) if parts else ""
     
     if emitter:
-        emitter.stage_end("gather_context", success=True)
+        await emitter.stage_end("gather_context", success=True)
     
-    logger.info(f"📦 Context assembled: {len(context['combined'])} chars")
+    logger.info(f"📋 Context gathered: {len(context['combined'])} chars")
     
     return {"context": context}

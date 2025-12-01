@@ -66,8 +66,8 @@ class WorkflowRequest(BaseModel):
         default="analysis", description="Stage name within workflow"
     )
     query: str = Field(..., description="User query to process")
-    data_path: Optional[str] = Field(None, description="Path to data file (CSV)")
-    web_search_enabled: bool = Field(default=False, description="Enable web search")
+    data_path: Optional[str] = Field("/Users/redam94/Coding/Ideas/variable_importance/results/workflow_20251129_122152/analysis/execution/tmpaty2dvcy.csv", description="Path to data file (CSV)")
+    web_search_enabled: bool = Field(default=True, description="Enable web search")
 
     model_config = {
         "json_schema_extra": {

@@ -445,6 +445,23 @@ class OutputManager:
             return self.manifest["stages"][stage_name]["outputs"]
         return []
     
+    def get_plots(self, stage_name: str) -> List[str]:
+        """
+        Get all plot file paths for a specific stage.
+        
+        Args:
+            stage_name: Name of the stage
+        Returns:
+            List of plot file paths
+        """
+        outputs = self.get_stage_outputs(stage_name)
+        plot_files = [
+            output["path"]
+            for output in outputs
+            if output["type"] in ["file_.png", "file_.jpg", "file_.jpeg", "file_.svg", "file_.pdf"]
+        ]
+        return plot_files
+    
     def create_summary_report(self) -> Path:
         """
         Create a human-readable summary report of all outputs.
@@ -475,6 +492,33 @@ class OutputManager:
         
         logger.info(f"📋 Created summary report: {report_file}")
         return report_file
+    
+    def get_stage_summary(self, stage_name: str) -> Optional[str]:
+        """
+        Get a brief summary of outputs for a specific stage.
+        
+        Args:
+            stage_name: Name of the stage"""
+        summary_path = self.workflow_dir / "SUMMARY.md"
+
+        
+        self.create_summary_report()
+
+        with open(summary_path, 'r') as f:
+            lines = f.readlines()
+        
+        in_stage_section = False
+        summary_lines = []
+        for line in lines:
+            if line.startswith(f"### {stage_name}"):
+                in_stage_section = True
+                summary_lines.append(line)
+            elif in_stage_section:
+                if line.startswith("### "):  # Next stage
+                    break
+                summary_lines.append(line)
+        
+        return ''.join(summary_lines).strip()
     
     @contextmanager
     def capture_execution(

@@ -86,6 +86,7 @@ def build_workflow_v2() -> StateGraph:
             "execute": "execute",
             "answer": "answer",
             "analyze_plots": "analyze_plots",
+            "web_search": "execute",
         }
     )
     
