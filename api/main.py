@@ -91,13 +91,15 @@ async def log_requests(request: Request, call_next):
 # EXCEPTION HANDLERS
 # =============================================================================
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Handle unexpected exceptions."""
     logger.error(f"Unhandled exception: {exc}")
     import traceback
+
     traceback.print_exc()
-    
+
     return JSONResponse(
         status_code=500,
         content=ErrorResponse(
@@ -125,6 +127,7 @@ app.include_router(websocket.router)
 # ROOT ENDPOINTS
 # =============================================================================
 
+
 @app.get("/", include_in_schema=False)
 async def root():
     """Redirect to docs."""
@@ -142,7 +145,7 @@ async def health_check() -> HealthResponse:
     Check API health including RAG and Ollama status.
     """
     ollama_ok = await check_ollama_health()
-    
+
     # Check default RAG
     rag_enabled = False
     rag_chunks = 0
@@ -154,7 +157,7 @@ async def health_check() -> HealthResponse:
             rag_chunks = stats.get("total_chunks", 0)
     except Exception:
         pass
-    
+
     return HealthResponse(
         status="healthy" if ollama_ok else "degraded",
         version="1.0.0",
@@ -172,7 +175,7 @@ async def health_check() -> HealthResponse:
 async def list_models() -> dict:
     """Get list of available Ollama models."""
     from dependencies import get_available_models
-    
+
     models = await get_available_models()
     return {
         "models": models,
@@ -186,7 +189,7 @@ async def list_models() -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
