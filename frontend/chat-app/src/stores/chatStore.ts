@@ -33,7 +33,8 @@ export const useChatStore = create<ChatState>()(
       streamingContent: '',
       error: null,
       
-      setWorkflowId: (id: string) => set({ workflowId: id }),
+      setWorkflowId: (id: string) => set((state) => {
+        return { workflowId: id }}),
       
       addMessage: (message: ChatMessage) =>
         set((state) => ({
@@ -82,7 +83,6 @@ export const useChatStore = create<ChatState>()(
         set({
           messages: [],
           streamingContent: '',
-          workflowId: generateWorkflowId(),
         }),
       
       setError: (error: string | null) => set({ error }),

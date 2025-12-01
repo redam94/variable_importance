@@ -102,14 +102,14 @@ export function RAGSearchPage() {
           <div className="card p-4">
             <div className="text-sm text-gray-500 mb-2">Document Types</div>
             <div className="flex flex-wrap gap-1">
-              {Object.entries(stats.doc_types).map(([type, count]) => (
+              {Object.entries(stats.doc_types || {}).map(([type, count]) => (
                 <span
                   key={type}
                   className="text-xs px-2 py-1 bg-gray-100 rounded-full"
                 >
                   {type}: {count as number}
                 </span>
-              ))}
+              )) || <div>No document types available</div>}
             </div>
           </div>
         </div>

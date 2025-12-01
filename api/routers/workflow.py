@@ -28,7 +28,7 @@ from dependencies import (
     OutputManagerRegistry,
     settings,
 )
-from api.routers.auth_route import (
+from auth import (
     get_current_user_optional,
     get_current_active_user,
     User,

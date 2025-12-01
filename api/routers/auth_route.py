@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from loguru import logger
 
-from api.routers.auth_route import (
+from auth import (
     Token,
     UserCreate,
     UserResponse,

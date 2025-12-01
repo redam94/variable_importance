@@ -40,12 +40,13 @@ export function WorkflowsPage() {
   )
   
   const handleLoadWorkflow = (id: string) => {
+    console.log('Loading workflow:', id)
     setWorkflowId(id)
     clearMessages()
   }
   
-  const totalStages = workflows.reduce((sum, w) => sum + w.total_stages, 0)
-  const totalOutputs = workflows.reduce((sum, w) => sum + w.total_outputs, 0)
+  const totalStages = workflows.reduce((sum, w) => sum + w.stage_count, 0)
+  const totalOutputs = workflows.reduce((sum, w) => sum + w.stage_count, 0)
   
   return (
     <div className="p-8 max-w-4xl mx-auto">
@@ -148,16 +149,12 @@ export function WorkflowsPage() {
                     
                     <div className="flex items-center gap-4 mt-1 text-sm text-gray-500">
                       <span className="flex items-center gap-1">
-                        <Calendar size={14} />
-                        {new Date(workflow.created_at).toLocaleDateString()}
-                      </span>
-                      <span className="flex items-center gap-1">
                         <Layers size={14} />
-                        {workflow.total_stages} stages
+                        {workflow.stage_count} stages
                       </span>
                       <span className="flex items-center gap-1">
                         <FileOutput size={14} />
-                        {workflow.total_outputs} outputs
+                        {workflow.stage_count} outputs
                       </span>
                     </div>
                   </div>

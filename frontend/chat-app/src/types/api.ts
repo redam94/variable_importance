@@ -201,7 +201,5 @@ export interface ErrorResponse {
 
 export interface Workflow {
   workflow_id: string
-  created_at: string
-  total_stages: number
-  total_outputs: number
+  stage_count: number
 }
