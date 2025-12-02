@@ -190,3 +190,28 @@ export interface HealthResponse {
   rag_available: boolean
   workflow_ready: boolean
 }
+
+// =============================================================================
+// IMAGE TYPES
+// =============================================================================
+
+export interface ImageInfo {
+  filename: string
+  path: string       // Relative path from workflow root
+  stage: string
+  url: string        // API URL to fetch the image (includes query param)
+  size_bytes: number
+}
+
+export interface StageFiles {
+  stage_name: string
+  images: ImageInfo[]
+  data_files: string[]
+  code_files: string[]
+}
+
+export interface WorkflowImages {
+  workflow_id: string
+  total_images: number
+  images: ImageInfo[]
+}

@@ -77,7 +77,7 @@ class WorkflowFileTools:
                     continue
             
             try:
-                rel_path = file_path.relative_to(self.workflow_dir/stage/'execution') if stage else file_path.relative_to(self.workflow_dir/'analysis'/'execution')
+                rel_path = file_path.relative_to(self.workflow_dir) if stage else file_path.relative_to(self.workflow_dir)
                 files.append(FileInfo(
                     name=file_path.name,
                     path=str(file_path),

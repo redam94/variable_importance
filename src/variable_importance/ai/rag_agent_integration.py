@@ -33,11 +33,11 @@ async def gather_rag_context(
     stage = "gather_context"
     
     config = RAGAgentConfig(
-        max_iterations=10,
+        max_iterations=5,
         relevance_threshold=0.6,
-        max_chunks_per_query=10,
-        max_total_chunks=20,
-        max_context_chars=3000,
+        max_chunks_per_query=30,
+        max_total_chunks=50,
+        max_context_chars=8000,
     )
     
     llm_model = deps.get("llm", DEFAULTS["llm"])
@@ -56,7 +56,7 @@ async def gather_rag_context(
             iteration_count[0] += 1
             
             if emitter and query_text:
-                asyncio.run(emitter.rag_query(
+                _run_async(emitter.rag_query(
                     stage=stage,
                     query=query_text,
                     iteration=iteration_count[0],
@@ -171,6 +171,20 @@ async def _fallback_rag_search(
 # =============================================================================
 # UPDATED GATHER_CONTEXT NODE
 # =============================================================================
+def _run_async(coro):
+    """
+    Run async coroutine from sync context.
+    
+    Handles the case where we're already inside an event loop (FastAPI)
+    by scheduling the task instead of blocking.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # Already in async context - schedule as task (fire-and-forget)
+        loop.create_task(coro)
+    except RuntimeError:
+        # No running loop - create one and run
+        asyncio.run(coro)
 
 async def gather_context_with_agent(state: State, runtime) -> dict:
     """
@@ -222,7 +236,7 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
             
             def on_progress(msg):
                 if emitter:
-                    asyncio.run(emitter.stage_start("gather_context", f"🌐 {msg}"))
+                    _run_async(emitter.stage_start("gather_context", f"🌐 {msg}"))
             
             search_result = await search_and_synthesize(
                 query=query,

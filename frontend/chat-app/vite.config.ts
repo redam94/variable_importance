@@ -70,6 +70,7 @@ export default defineConfig({
         },
       },
     },
+    allowedHosts: ['.local', 'localhost', '127.0.0.1', "813ef8ed8339.ngrok-free.app"]
   },
   
   build: {

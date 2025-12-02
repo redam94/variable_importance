@@ -16,6 +16,8 @@ import type {
   Document,
   Workflow,
   DataFileUploadResponse,
+  WorkflowImages,
+  StageFiles,
 } from '../types/api'
 
 const API_BASE = '/api'
@@ -467,5 +469,58 @@ export const documentsApi = {
 export const healthApi = {
   async check(): Promise<HealthResponse> {
     return apiFetch<HealthResponse>('/health', { requireAuth: false })
+  },
+}
+
+// =============================================================================
+// FILES API - Add to lib/api.ts
+// =============================================================================
+
+export const filesApi = {
+  /**
+   * List all images for a workflow
+   */
+  async listImages(workflowId: string, stage?: string): Promise<WorkflowImages> {
+    const params = stage ? `?stage=${encodeURIComponent(stage)}` : ''
+    return apiFetch<WorkflowImages>(`/files/${workflowId}/images${params}`)
+  },
+
+  /**
+   * Get image URL with query parameter
+   * Returns a URL that can be used to fetch the image
+   */
+  getImageUrl(workflowId: string, imagePath: string): string {
+    return `/files/${workflowId}/image?path=${encodeURIComponent(imagePath)}`
+  },
+
+  /**
+   * Fetch image as blob (for authenticated access)
+   */
+  async fetchImageBlob(workflowId: string, imagePath: string): Promise<Blob> {
+    const token = getStoredToken()
+    const response = await fetch(
+      `/files/${workflowId}/image?path=${encodeURIComponent(imagePath)}`,
+      {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      }
+    )
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.statusText}`)
+    }
+    return response.blob()
+  },
+
+  /**
+   * List all stages with their files
+   */
+  async listStagesWithFiles(workflowId: string): Promise<StageFiles[]> {
+    return apiFetch<StageFiles[]>(`/files/${workflowId}/stages`)
+  },
+
+  /**
+   * Get download URL for any file
+   */
+  getDownloadUrl(workflowId: string, filePath: string): string {
+    return `/files/${workflowId}/download?path=${encodeURIComponent(filePath)}`
   },
 }

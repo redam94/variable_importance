@@ -7,6 +7,8 @@ import { RAGAgentMessage } from '../components/chat/RAGAgentMessage'
 import { ChatInput } from '../components/chat/ChatInput'
 import { WorkflowProgress } from '../components/workflow/WorkflowProgress'
 import { FileUploadZone } from '../components/workflow/FileUploadZone'
+import { useWorkflowImages } from '../hooks/useWorkflowImages'
+import { ImageViewer, ImageGrid } from '../components/images/ImageViewer'
 import {
   Trash2,
   Wifi,
@@ -17,6 +19,7 @@ import {
   Search,
   BookOpen,
   X,
+  Image,
 } from 'lucide-react'
 import clsx from 'clsx'
 import type { ChatMessage as ChatMessageType } from '../types/ws'
@@ -28,6 +31,17 @@ export function WorkflowChatPage() {
   // Get workflowId from store (persisted)
   const { workflowId } = useChatStore()
 
+  // Add image state
+  const [showImages, setShowImages] = useState(false)
+  const [viewerOpen, setViewerOpen] = useState(false)
+  const [viewerIndex, setViewerIndex] = useState(0)
+  
+  // Fetch images
+  const { images, totalImages, loading: imagesLoading } = useWorkflowImages({
+    workflowId,
+    autoFetch: true,
+  })
+  console.log('Fetched images:', images)
   // File upload state
   const [dataFile, setDataFile] = useState<File | null>(null)
   const [dataPath, setDataPath] = useState<string | null>(null)
@@ -116,7 +130,15 @@ export function WorkflowChatPage() {
       <header className="flex items-center justify-between px-6 py-4 border-b border-gray-200 bg-white">
         <div className="flex items-center gap-3">
           <h1 className="text-xl font-semibold text-gray-900">Workflow Chat</h1>
-
+          {totalImages > 0 && (
+          <button
+            onClick={() => setShowImages(!showImages)}
+            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-gray-100 hover:bg-gray-200 rounded-lg"
+          >
+            <Image size={16} />
+            <span>{totalImages} images</span>
+          </button>
+        )}
           {/* Connection status */}
           <div
             className={clsx(
@@ -164,6 +186,25 @@ export function WorkflowChatPage() {
           </button>
         </div>
       </header>
+      {showImages && images.length > 0 && (
+        <div className="border-b p-4 bg-gray-50">
+          <ImageGrid
+            images={images}
+            onImageClick={(idx) => {
+              setViewerIndex(idx)
+              setViewerOpen(true)
+            }}
+          />
+        </div>
+      )}
+      {/* Full-screen viewer */}
+      {viewerOpen && (
+        <ImageViewer
+          images={images}
+          initialIndex={viewerIndex}
+          onClose={() => setViewerOpen(false)}
+        />
+      )}
 
       {/* Settings panel */}
       {showSettings && (

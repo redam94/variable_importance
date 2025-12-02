@@ -114,7 +114,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 # ROUTERS
 # =============================================================================
 
-from routers import workflow, chat, documents, websocket, auth_route, workflow_async
+from routers import workflow, chat, documents, websocket, auth_route, workflow_async, files
 
 app.include_router(auth_route.router)
 app.include_router(workflow.router)
@@ -122,7 +122,7 @@ app.include_router(chat.router)
 app.include_router(documents.router)
 app.include_router(websocket.router)
 app.include_router(workflow_async.router)
-
+app.include_router(files.router)
 
 # =============================================================================
 # ROOT ENDPOINTS
