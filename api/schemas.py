@@ -35,9 +35,10 @@ class DocumentSourceType(str, Enum):
 # WORKFLOW SCHEMAS
 # =============================================================================
 
+
 class DataFileUploadResponse(BaseModel):
     """Response after uploading a data file for workflow analysis."""
-    
+
     success: bool
     filename: str
     file_path: str = Field(..., description="Temporary path to use as data_path in workflow")
@@ -53,21 +54,21 @@ class DataFileUploadResponse(BaseModel):
                 "file_path": "/tmp/workflow_data/abc123/sales_data.csv",
                 "file_size": 1024,
                 "content_type": "text/csv",
-                "message": "File uploaded successfully"
+                "message": "File uploaded successfully",
             }
         }
     }
+
 
 class WorkflowRequest(BaseModel):
     """Request to run the workflow."""
 
     workflow_id: str = Field(..., description="Unique workflow identifier")
-    stage_name: str = Field(
-        default="analysis", description="Stage name within workflow"
-    )
+    stage_name: str = Field(default="analysis", description="Stage name within workflow")
     query: str = Field(..., description="User query to process")
-    data_path: Optional[str] = Field("/Users/redam94/Coding/Ideas/variable_importance/results/workflow_20251129_122152/analysis/execution/tmpaty2dvcy.csv", description="Path to data file (CSV)")
-    web_search_enabled: bool = Field(default=True, description="Enable web search")
+    data_path: Optional[str] = Field(default=None, description="Path to data file (CSV)")
+    web_search_enabled: bool = Field(default=False, description="Enable web search")
+    rag_enabled: bool = Field(default=True, description="Enable RAG context retrieval")
 
     model_config = {
         "json_schema_extra": {
@@ -77,6 +78,7 @@ class WorkflowRequest(BaseModel):
                 "query": "Analyze the correlation between price and sales",
                 "data_path": "/data/sales.csv",
                 "web_search_enabled": False,
+                "rag_enabled": True,
             }
         }
     }
@@ -103,16 +105,19 @@ class WorkflowResponse(BaseModel):
     plots: Optional[List[str]] = None
     summary: Optional[str] = None
     error: Optional[str] = None
+    artifacts: List[str] = Field(default_factory=list)
+    execution_time_seconds: float = Field(default=0.0)
 
 
 class WorkflowStatus(BaseModel):
     """Status of a running workflow."""
 
+    task_id: Optional[str] = None
     workflow_id: str
     stage_name: str
     status: str
     current_node: Optional[str] = None
-    progress: float = Field(default=0.0, ge=0.0, le=1.0)
+    progress: float = Field(default=0.0, ge=0.0, le=100.0)
     elapsed_seconds: Optional[float] = None
 
 
@@ -133,9 +138,7 @@ class ChatRequest(BaseModel):
 
     workflow_id: str = Field(..., description="Workflow context for RAG")
     message: str = Field(..., description="User message")
-    history: Optional[List[ChatMessage]] = Field(
-        default=None, description="Previous messages"
-    )
+    history: Optional[List[ChatMessage]] = Field(default=None, description="Previous messages")
     model: Optional[str] = Field(default="qwen3:30b", description="LLM model to use")
 
     model_config = {
@@ -181,28 +184,16 @@ class URLScrapeRequest(BaseModel):
     """Request to scrape a URL."""
 
     url: str = Field(..., description="URL to scrape")
-    workflow_id: str = Field(..., description="Workflow to add content to")
-    title: Optional[str] = Field(
-        None, description="Custom title (auto-detected if not provided)"
-    )
-
-    model_config = {
-        "json_schema_extra": {
-            "example": {
-                "url": "https://docs.python.org/3/tutorial/datastructures.html",
-                "workflow_id": "analysis_001",
-                "title": "Python Data Structures",
-            }
-        }
-    }
+    workflow_id: str = Field(..., description="Workflow to associate with")
+    title: Optional[str] = Field(default=None, description="Optional title override")
 
 
 class URLScrapeResponse(BaseModel):
-    """Response after URL scraping."""
+    """Response from URL scraping."""
 
     success: bool
-    url: str
     title: str
+    url: str
     chunk_count: int
     content_length: int
     workflow_id: str
@@ -215,20 +206,20 @@ class URLScrapeResponse(BaseModel):
 
 
 class RAGQueryRequest(BaseModel):
-    """Request to query RAG directly."""
+    """Request to query RAG."""
 
-    query: str = Field(..., description="Search query")
-    workflow_id: Optional[str] = None
-    n_results: int = Field(default=5, ge=1, le=50)
-    doc_types: Optional[List[str]] = None
+    query: str
+    workflow_id: str
+    n_results: int = Field(default=5, ge=1, le=20)
 
 
 class RAGChunk(BaseModel):
-    """A single RAG result chunk."""
+    """A RAG result chunk."""
 
     content: str
-    metadata: Dict[str, Any]
-    relevance_score: float
+    source: str
+    score: float
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class RAGQueryResponse(BaseModel):
@@ -236,27 +227,35 @@ class RAGQueryResponse(BaseModel):
 
     query: str
     results: List[RAGChunk]
-    total_found: int
+    total_chunks: int
+
+
+class RAGStats(BaseModel):
+    """RAG collection statistics."""
+
+    workflow_id: str
+    total_documents: int
+    total_chunks: int
+    sources: List[str]
 
 
 # =============================================================================
-# HEALTH & STATUS
+# HEALTH SCHEMAS
 # =============================================================================
 
 
 class HealthResponse(BaseModel):
-    """API health check response."""
+    """Health check response."""
 
-    status: str = "healthy"
+    status: str
     version: str = "1.0.0"
-    rag_enabled: bool = False
-    rag_chunks: int = 0
-    ollama_reachable: bool = False
+    ollama_connected: bool = False
+    rag_available: bool = False
+    workflow_ready: bool = False
 
 
 class ErrorResponse(BaseModel):
-    """Standard error response."""
+    """Error response."""
 
-    error: str
-    detail: Optional[str] = None
-    status_code: int
+    detail: str
+    error_type: Optional[str] = None

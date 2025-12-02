@@ -162,9 +162,9 @@ async def health_check() -> HealthResponse:
     return HealthResponse(
         status="healthy" if ollama_ok else "degraded",
         version="1.0.0",
-        rag_enabled=rag_enabled,
+        rag_available=rag_enabled,
         rag_chunks=rag_chunks,
-        ollama_reachable=ollama_ok,
+        ollama_connected=ollama_ok,
     )
 
 

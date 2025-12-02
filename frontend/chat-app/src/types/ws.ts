@@ -27,6 +27,8 @@ export interface WSMessage {
   authenticated?: boolean
   username?: string
   workflow_id?: string
+  summary?: string
+  action?: string
   data?: WSMessageData
 }
 
@@ -41,21 +43,21 @@ export interface WSMessageData {
   total_chunks?: number
   final_relevance?: number
   accepted?: boolean
-  
+
   // Code events
   code?: string
   line_count?: number
-  
+
   // Execution events
   success?: boolean
   output?: string
-  
+
   // Error
   error?: string
-  
+
   // Progress
   progress?: number
-  
+
   // Generic
   [key: string]: unknown
 }
@@ -124,7 +126,7 @@ export function updateRAGGroups(
       })
       break
 
-    case 'rag_query':
+    case 'rag_query': {
       const group = newGroups.get(eventId)
       if (group) {
         group.queries.push({
@@ -136,8 +138,9 @@ export function updateRAGGroups(
         group.total_iterations = group.queries.length
       }
       break
+    }
 
-    case 'rag_search_end':
+    case 'rag_search_end': {
       const endGroup = newGroups.get(eventId)
       if (endGroup) {
         endGroup.status = message.data?.accepted ? 'complete' : 'failed'
@@ -147,6 +150,7 @@ export function updateRAGGroups(
         endGroup.accepted = message.data?.accepted || false
       }
       break
+    }
   }
 
   return newGroups

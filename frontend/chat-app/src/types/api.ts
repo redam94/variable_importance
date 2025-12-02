@@ -35,9 +35,12 @@ export interface RegisterRequest {
 
 export interface WorkflowRequest {
   query: string
-  workflow_id?: string
+  workflow_id: string
   stage_name?: string
   model?: string
+  data_path?: string
+  web_search_enabled?: boolean
+  rag_enabled?: boolean
 }
 
 export interface WorkflowMessage {
@@ -77,6 +80,13 @@ export interface WorkflowStatus {
   current_node?: string
   progress: number
   elapsed_seconds?: number
+}
+
+export interface Workflow {
+  workflow_id: string
+  created_at: string
+  stage_count: number
+  stages: string[]
 }
 
 // =============================================================================
@@ -124,8 +134,8 @@ export interface URLScrapeRequest {
 
 export interface URLScrapeResponse {
   success: boolean
-  url: string
   title: string
+  url: string
   chunk_count: number
   content_length: number
   workflow_id: string
@@ -136,94 +146,47 @@ export interface Document {
   title: string
   source_type: DocumentSourceType
   chunk_count: number
-  content_length: number
-  timestamp: string
-  url?: string
-  source_path?: string
+  created_at: string
 }
 
 // =============================================================================
 // RAG TYPES
 // =============================================================================
 
-export interface RAGChunk {
-  content: string
-  metadata: Record<string, unknown>
-  relevance_score: number
-}
-
 export interface RAGQueryRequest {
   query: string
-  workflow_id?: string
-  doc_types?: string[]
+  workflow_id: string
   n_results?: number
+}
+
+export interface RAGChunk {
+  content: string
+  source: string
+  score: number
+  metadata: Record<string, unknown>
 }
 
 export interface RAGQueryResponse {
   query: string
   results: RAGChunk[]
-  total_found: number
+  total_chunks: number
 }
 
 export interface RAGStats {
-  total_chunks: number
+  workflow_id: string
   total_documents: number
-  doc_types: Record<string, number>
+  total_chunks: number
+  sources: string[]
 }
 
 // =============================================================================
-// WEBSOCKET TYPES
-// =============================================================================
-
-export interface WSMessage {
-  type: 'connected' | 'progress' | 'stage_start' | 'stage_end' | 'error' | 'done' | 'pong'
-  task_id?: string
-  event?: string
-  stage?: string
-  message?: string
-  timestamp?: string
-  authenticated?: boolean
-  username?: string
-  workflow_id?: string
-  data?: Record<string, unknown>
-}
-
-export interface WSProgressEvent {
-  type: 'progress'
-  task_id: string
-  event: string
-  stage: string
-  message: string
-  timestamp: string
-  data?: Record<string, unknown>
-}
-
-// =============================================================================
-// API RESPONSE TYPES
+// HEALTH TYPES
 // =============================================================================
 
 export interface HealthResponse {
-  status: 'healthy' | 'degraded'
-  ollama_reachable: boolean
-  rag_enabled: boolean
+  status: string
   version: string
-}
-
-export interface ErrorResponse {
-  detail: string
-  error_code?: string
-}
-
-export interface Workflow {
-  workflow_id: string
-  stage_count: number
-}
-
-export interface DataFileUploadResponse {
-  success: boolean
-  filename: string
-  file_path: string
-  file_size: number
-  content_type: string
-  message: string
+  ollama_connected: boolean
+  rag_available: boolean
+  workflow_ready: boolean
 }

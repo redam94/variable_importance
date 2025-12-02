@@ -141,25 +141,25 @@ export function DashboardPage() {
         
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <div className="flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.ollama_reachable ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.ollama_connected ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
               <Cpu size={20} />
             </div>
             <div>
               <p className="font-medium text-gray-900">Ollama</p>
               <p className="text-sm text-gray-500">
-                {health?.ollama_reachable ? 'Connected' : 'Disconnected'}
+                {health?.ollama_connected ? 'Connected' : 'Disconnected'}
               </p>
             </div>
           </div>
           
           <div className="flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.rag_enabled ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.rag_available ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
               <Database size={20} />
             </div>
             <div>
               <p className="font-medium text-gray-900">RAG System</p>
               <p className="text-sm text-gray-500">
-                {health?.rag_enabled ? 'Active' : 'Inactive'}
+                {health?.rag_available ? 'Active' : 'Inactive'}
               </p>
             </div>
           </div>
