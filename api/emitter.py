@@ -136,7 +136,7 @@ class WebSocketEmitter:
     ) -> None:
         """Emit a progress event via WebSocket."""
         payload = {
-            "type": event_type.value,
+            "type": event_type.value if isinstance(event_type, EventType) else str(event_type),
             "task_id": self.task_id,
             "stage": stage,
             "message": message,

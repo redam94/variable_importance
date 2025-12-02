@@ -48,7 +48,79 @@ def get_factory(deps: Optional[Deps] = None) -> NodeFactory:
 
 
 # =============================================================================
-# HELPERS
+# EMITTER HELPERS
+# =============================================================================
+
+def get_emitter(deps: Deps):
+    """Get emitter from deps (injected by API)."""
+    return deps.get("emitter")
+
+
+def _run_async(coro):
+    """
+    Run async coroutine from sync context.
+    
+    Handles the case where we're already inside an event loop (FastAPI)
+    by scheduling the task instead of blocking.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # Already in async context - schedule as task (fire-and-forget)
+        loop.create_task(coro)
+    except RuntimeError:
+        # No running loop - create one and run
+        asyncio.run(coro)
+
+
+async def emit_async(deps: Deps, event_type: str, stage: str, message: str, data: Optional[Dict] = None):
+    """Emit event asynchronously."""
+    emitter = get_emitter(deps)
+    if emitter:
+        await emitter.emit(event_type, stage, message, data)
+
+
+def emit(deps: Deps, stage: str, message: str, data: Optional[Dict] = None):
+    """
+    Emit progress event (sync wrapper).
+    
+    Safe to call from both sync and async contexts.
+    """
+    emitter = get_emitter(deps)
+    if emitter:
+        from ..utils.progress_events import EventType
+        _run_async(emitter.emit(str(EventType.PROGRESS), stage, message, data))
+
+
+async def stage_start(deps: Deps, stage: str, description: str = ""):
+    """Signal stage start."""
+    emitter = get_emitter(deps)
+    if emitter:
+        await emitter.stage_start(stage, description)
+
+
+async def stage_end(deps: Deps, stage: str, success: bool = True):
+    """Signal stage end."""
+    emitter = get_emitter(deps)
+    if emitter:
+        await emitter.stage_end(stage, success)
+
+
+def stage_start_sync(deps: Deps, stage: str, description: str = ""):
+    """Signal stage start (sync wrapper)."""
+    emitter = get_emitter(deps)
+    if emitter:
+        _run_async(emitter.stage_start(stage, description))
+
+
+def stage_end_sync(deps: Deps, stage: str, success: bool = True):
+    """Signal stage end (sync wrapper)."""
+    emitter = get_emitter(deps)
+    if emitter:
+        _run_async(emitter.stage_end(stage, success))
+
+
+# =============================================================================
+# LLM HELPERS
 # =============================================================================
 
 def get_llm(deps: Deps, model_key: str = "llm") -> ChatOllama:
@@ -63,162 +135,11 @@ def get_query(state: State) -> str:
     return messages[-1].content if messages else ""
 
 
-def get_emitter(deps: Deps):
-    """Get progress emitter."""
-    return deps.get("progress_emitter")
-
-
-def emit(deps: Deps, stage: str, message: str):
-    """Emit progress event."""
-    emitter = get_emitter(deps)
-    if emitter:
-        from ..utils.progress_events import EventType
-        emitter.emit(EventType.PROGRESS, stage, message)
-
-
 # =============================================================================
-# NODE: GATHER CONTEXT
+# NODE: GATHER CONTEXT (imported from rag_agent_integration)
 # =============================================================================
 
-# async def gather_context(state: State, runtime) -> dict:
-#     """
-#     Gather all context: RAG, web search, existing outputs, documents.
-    
-#     Stores web results in RAG for future retrieval.
-#     """
-#     deps = runtime.context
-#     emitter = get_emitter(deps)
-    
-#     if emitter:
-#         emitter.stage_start("gather_context", "Gathering context")
-    
-#     query = get_query(state)
-#     workflow_id = state.get("workflow_id", "default")
-#     stage_name = state.get("stage_name", "analysis")
-    
-#     context = Context(rag="", web="", outputs="", plots=[], combined="")
-#     parts = []
-    
-#     # 1. RAG Context
-#     rag = deps.get("rag")
-#     if rag and rag.enabled:
-#         try:
-#             emit(deps, "gather_context", "📚 Querying RAG...")
-            
-#             rag_summary = rag.get_context_summary(
-#                 query=query,
-#                 workflow_id=workflow_id,
-#                 max_tokens=1500
-#             )
-#             if rag_summary:
-#                 context["rag"] = rag_summary
-#                 parts.append(f"[Previous Analysis]\n{rag_summary}")
-                
-#                 if emitter:
-#                     emitter.rag_query("gather_context", len(rag_summary.split('\n')))
-                
-#                 logger.info(f"📚 RAG: {len(rag_summary)} chars")
-                
-#             # Query documents separately
-#             doc_results = rag.query_documents(
-#                 query=query,
-#                 workflow_id=workflow_id,
-#                 n_results=5
-#             )
-#             if doc_results:
-#                 doc_texts = [
-#                     f"[{d['metadata'].get('title', 'Doc')}]: {d['document'][:500]}"
-#                     for d in doc_results
-#                 ]
-#                 parts.append(f"[Reference Documents]\n" + "\n\n".join(doc_texts))
-#                 emit(deps, "gather_context", f"📄 Found {len(doc_results)} document chunks")
-                
-#         except Exception as e:
-#             logger.warning(f"RAG failed: {e}")
-    
-#     # 2. Web Search (if enabled)
-#     if state.get("web_search_enabled"):
-#         try:
-#             from .web_search import search_and_synthesize
-            
-#             emit(deps, "gather_context", "🌐 Searching web...")
-            
-#             llm_model = deps.get("llm", DEFAULTS["llm"])
-#             base_url = deps.get("base_url", DEFAULTS["base_url"])
-            
-#             def on_progress(msg):
-#                 emit(deps, "gather_context", f"🌐 {msg}")
-            
-#             search_result = await search_and_synthesize(
-#                 query=query,
-#                 context=context.get("rag", ""),
-#                 llm_model=llm_model,
-#                 base_url=base_url,
-#                 on_progress=on_progress
-#             )
-            
-#             if search_result["results"]:
-#                 context["web"] = search_result["formatted_text"]
-#                 parts.append(f"[Web Research]\n{search_result['formatted_text']}")
-                
-#                 # Store in RAG
-#                 if rag and rag.enabled:
-#                     web_results = [
-#                         {
-#                             "url": r.url,
-#                             "title": r.title,
-#                             "content": r.content,
-#                             "score": r.score,
-#                             "source": r.source,
-#                             "enriched": "crawl4ai" in r.source.lower(),
-#                             "query_used": r.query_used
-#                         }
-#                         for r in search_result["results"]
-#                     ]
-#                     rag.add_web_search_batch(
-#                         query=query,
-#                         results=web_results,
-#                         stage_name=stage_name,
-#                         workflow_id=workflow_id,
-#                     )
-                    
-#                 logger.info(f"🌐 Web: {len(search_result['results'])} results")
-                
-#         except Exception as e:
-#             logger.warning(f"Web search failed: {e}")
-    
-#     # 3. Existing Outputs
-#     output_manager = deps.get("output_manager")
-#     if output_manager and stage_name:
-#         try:
-#             stage_dir = output_manager.get_stage_dir(stage_name)
-            
-#             # List available files
-#             file_tools = WorkflowFileTools(output_manager.workflow_dir)
-#             stage_files = file_tools.get_stage_files(stage_name)
-            
-#             if stage_files["plots"]:
-#                 context["plots"] = [f.path for f in stage_files["plots"]]
-#                 parts.append(f"[Existing Plots: {len(stage_files['plots'])}]")
-#                 emit(deps, "gather_context", f"📊 Found {len(stage_files['plots'])} plots")
-            
-#             # Get latest console output
-#             latest_output = file_tools.get_latest_output(stage_name)
-#             if latest_output:
-#                 context["outputs"] = latest_output[:1500]
-#                 parts.append(f"[Previous Output]\n{latest_output[:1000]}")
-                
-#         except Exception as e:
-#             logger.warning(f"Output check failed: {e}")
-    
-#     context["combined"] = "\n\n".join(parts) if parts else "No prior context."
-    
-#     if emitter:
-#         emitter.stage_end("gather_context", success=True)
-    
-#     logger.info(f"📦 Context: {len(context['combined'])} chars")
-    
-#     return {"context": context}
+# gather_context is imported from rag_agent_integration module
 
 
 # =============================================================================
@@ -237,14 +158,10 @@ class PlanOutput(BaseModel):
 
 
 def plan(state: State, runtime) -> dict:
-    """
-    Create analysis plan and decide primary action.
-    """
+    """Create analysis plan and decide primary action."""
     deps = runtime.context
-    emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("plan", "Creating analysis plan")
+    stage_start_sync(deps, "plan", "Creating analysis plan")
     
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
@@ -280,9 +197,7 @@ Create specific, actionable steps. Be conservative - prefer execute over answer.
         ])
         
         emit(deps, "plan", f"📋 Action: {result.action}")
-        
-        if emitter:
-            emitter.stage_end("plan", success=True)
+        stage_end_sync(deps, "plan", success=True)
         
         logger.info(f"🎯 Plan: {result.action} ({len(result.steps)} steps)")
         
@@ -294,8 +209,7 @@ Create specific, actionable steps. Be conservative - prefer execute over answer.
         
     except Exception as e:
         logger.error(f"Planning failed: {e}")
-        if emitter:
-            emitter.stage_end("plan", success=False)
+        stage_end_sync(deps, "plan", success=False)
         return {
             "plan": "Execute data analysis",
             "action": "execute",
@@ -308,21 +222,17 @@ Create specific, actionable steps. Be conservative - prefer execute over answer.
 # =============================================================================
 
 async def execute(state: State, runtime) -> dict:
-    """
-    Generate code with file tools, execute, and fix errors.
-    """
+    """Generate code with file tools, execute, and fix errors."""
     deps = runtime.context
     emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("execute", "Generating and executing code")
+    await stage_start(deps, "execute", "Generating and executing code")
     
     query = get_query(state)
     data_path = Path(state.get("data_path", ""))
     
     if not data_path.exists():
-        if emitter:
-            emitter.stage_end("execute", success=False)
+        await stage_end(deps, "execute", success=False)
         return {"error": "Data file not found", "code": "", "output": None}
     
     output_manager = deps.get("output_manager")
@@ -347,7 +257,7 @@ async def execute(state: State, runtime) -> dict:
     plan = state.get("plan", "")
     
     # Code generation
-    emit(deps, "execute", "✍️ Generating code...")
+    await emit_async(deps, "progress", "execute", "✍️ Generating code...")
     
     code_llm = get_llm(deps, "code_llm").with_structured_output(CodeOutput)
     
@@ -390,14 +300,13 @@ The following file tools are auto-injected:
         code = file_tools_code + "\n" + result.code
         
         if emitter:
-            emitter.code_generated("execute", result.code[:300])
+            await emitter.code_generated("execute", result.code[:300], len(result.code.splitlines()))
         
         logger.info(f"✍️ Code generated ({len(result.code)} chars)")
         
     except Exception as e:
         logger.error(f"Code generation failed: {e}")
-        if emitter:
-            emitter.stage_end("execute", success=False)
+        await stage_end(deps, "execute", success=False)
         return {"error": str(e), "code": "", "output": None}
     
     # Execute with retries
@@ -407,7 +316,7 @@ The following file tools are auto-injected:
     error = ""
     
     for attempt in range(max_retries + 1):
-        emit(deps, "execute", f"⚡ Attempt {attempt + 1}/{max_retries + 1}")
+        await emit_async(deps, "progress", "execute", f"⚡ Attempt {attempt + 1}/{max_retries + 1}")
         
         output = await executor.execute_with_output_manager(
             code=code,
@@ -417,7 +326,7 @@ The following file tools are auto-injected:
         )
         
         if output.success:
-            emit(deps, "execute", "✅ Execution succeeded")
+            await emit_async(deps, "progress", "execute", "✅ Execution succeeded")
             logger.info("✅ Code executed successfully")
             error = ""
             break
@@ -425,12 +334,12 @@ The following file tools are auto-injected:
         error = output.stderr or output.error or "Unknown error"
         
         if emitter:
-            emitter.code_output("execute", error[:300], is_error=True)
+            await emitter.execution_result("execute", success=False, output=error[:300])
         
         logger.warning(f"❌ Attempt {attempt + 1} failed: {error[:100]}")
         
         if attempt < max_retries:
-            emit(deps, "execute", "🔧 Fixing code...")
+            await emit_async(deps, "progress", "execute", "🔧 Fixing code...")
             
             fix_prompt = f"""Fix this code error:
 
@@ -462,7 +371,7 @@ Return the complete fixed code."""
     rag = deps.get("rag")
     if output and output.success and rag and rag.enabled:
         rag.add_code_execution(
-            code=result.code,  # Original code without tools
+            code=result.code,
             stdout=output.stdout,
             stderr=output.stderr or "",
             stage_name=stage_name,
@@ -470,8 +379,7 @@ Return the complete fixed code."""
             success=True
         )
     
-    if emitter:
-        emitter.stage_end("execute", success=(output and output.success))
+    await stage_end(deps, "execute", success=(output and output.success))
     
     return {
         "code": result.code,
@@ -485,14 +393,11 @@ Return the complete fixed code."""
 # =============================================================================
 
 async def analyze_plots(state: State, runtime) -> dict:
-    """
-    Analyze plots with vision LLM.
-    """
+    """Analyze plots with vision LLM."""
     deps = runtime.context
     emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("plot_analysis", "Analyzing visualizations")
+    await stage_start(deps, "plot_analysis", "Analyzing visualizations")
     
     output_manager = deps.get("output_manager")
     plot_cache = deps.get("plot_cache")
@@ -509,7 +414,7 @@ async def analyze_plots(state: State, runtime) -> dict:
                 plot_files = list(plots_dir.glob("*.png"))
                 
                 if plot_files:
-                    emit(deps, "plot_analysis", f"🔍 Analyzing {len(plot_files)} plots")
+                    await emit_async(deps, "progress", "plot_analysis", f"🔍 Analyzing {len(plot_files)} plots")
                     
                     vision_llm = get_llm(deps, "vision_llm")
                     
@@ -519,11 +424,11 @@ async def analyze_plots(state: State, runtime) -> dict:
                             cached = plot_cache.get(str(plot_path))
                             if cached:
                                 analyses.append(cached)
-                                emit(deps, "plot_analysis", f"⚡ Cached: {plot_path.name}")
+                                await emit_async(deps, "progress", "plot_analysis", f"⚡ Cached: {plot_path.name}")
                                 continue
                         
                         try:
-                            emit(deps, "plot_analysis", f"🔍 {plot_path.name}")
+                            await emit_async(deps, "progress", "plot_analysis", f"🔍 {plot_path.name}")
                             
                             with open(plot_path, "rb") as f:
                                 img_data = base64.b64encode(f.read()).decode()
@@ -557,17 +462,13 @@ async def analyze_plots(state: State, runtime) -> dict:
                                     workflow_id=state.get("workflow_id", "default")
                                 )
                             
-                            if emitter:
-                                emitter.plot_analyzed("plot_analysis", plot_path.name, response.content[:100])
-                            
                         except Exception as e:
                             logger.warning(f"Plot analysis failed for {plot_path}: {e}")
                             
         except Exception as e:
             logger.warning(f"Plot gathering failed: {e}")
     
-    if emitter:
-        emitter.stage_end("plot_analysis", success=True)
+    await stage_end(deps, "plot_analysis", success=True)
     
     logger.info(f"📊 Analyzed {len(analyses)} plots")
     
@@ -575,18 +476,147 @@ async def analyze_plots(state: State, runtime) -> dict:
 
 
 # =============================================================================
-# NODE: SUMMARIZE
+# NODE: WEB SEARCH
 # =============================================================================
 
-async def summarize(state: State, runtime) -> dict:
+async def web_search(state: State, runtime) -> dict:
     """
-    Create comprehensive summary from all results.
+    Search web for additional methodology guidance or context.
+    
+    Used when:
+    - Verification determines more context is needed
+    - Plan decides web research would help
+    - User explicitly requests web search
+    
+    Results are stored in RAG for future retrieval.
     """
     deps = runtime.context
     emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("summarize", "Creating summary")
+    await stage_start(deps, "web_search", "Searching web for additional context")
+    
+    query = get_query(state)
+    workflow_id = state.get("workflow_id", "default")
+    stage_name = state.get("stage_name", "analysis")
+    
+    # Build search query from original query + any gaps identified
+    verification = state.get("verification", {})
+    missing_info = verification.get("missing_info", [])
+    
+    if missing_info:
+        search_query = f"{query} {' '.join(missing_info[:2])}"
+    else:
+        search_query = query
+    
+    await emit_async(deps, "progress", "web_search", f"🌐 Searching: {search_query[:50]}...")
+    
+    try:
+        from .web_search import search_and_synthesize
+        
+        llm_model = deps.get("llm", DEFAULTS["llm"])
+        base_url = deps.get("base_url", DEFAULTS["base_url"])
+        
+        async def on_progress(msg: str):
+            await emit_async(deps, "progress", "web_search", f"🌐 {msg}")
+        
+        # Use sync callback wrapper since search_and_synthesize expects sync
+        def sync_progress(msg: str):
+            _run_async(emit_async(deps, "progress", "web_search", f"🌐 {msg}"))
+        
+        search_result = await search_and_synthesize(
+            query=search_query,
+            context=state.get("context", {}).get("combined", "")[:1000],
+            llm_model=llm_model,
+            base_url=base_url,
+            enrich_with_crawl=True,
+            max_crawl_urls=3,
+            on_progress=sync_progress
+        )
+        
+        web_context = ""
+        results_count = 0
+        
+        if search_result.get("results"):
+            results_count = len(search_result["results"])
+            web_context = search_result.get("formatted_text", "")
+            
+            await emit_async(
+                deps, "progress", "web_search", 
+                f"✅ Found {results_count} results"
+            )
+            
+            # Store in RAG for future use
+            rag = deps.get("rag")
+            if rag and rag.enabled:
+                web_results = [
+                    {
+                        "url": r.url,
+                        "title": r.title,
+                        "content": r.content,
+                        "score": getattr(r, "score", 0.5),
+                        "source": getattr(r, "source", "web"),
+                        "enriched": "crawl4ai" in getattr(r, "source", "").lower(),
+                        "query_used": getattr(r, "query_used", search_query)
+                    }
+                    for r in search_result["results"]
+                ]
+                rag.add_web_search_batch(
+                    query=search_query,
+                    results=web_results,
+                    stage_name=stage_name,
+                    workflow_id=workflow_id,
+                )
+                logger.info(f"📚 Stored {len(web_results)} web results in RAG")
+        else:
+            await emit_async(deps, "progress", "web_search", "⚠️ No results found")
+        
+        await stage_end(deps, "web_search", success=bool(web_context))
+        
+        logger.info(f"🌐 Web search complete: {results_count} results")
+        
+        # Update context with web results
+        current_context = state.get("context", {})
+        current_context["web"] = web_context
+        
+        # Rebuild combined context
+        parts = []
+        if current_context.get("rag"):
+            parts.append(f"[Previous Analysis]\n{current_context['rag']}")
+        if web_context:
+            parts.append(f"[Web Research]\n{web_context}")
+        if current_context.get("outputs"):
+            parts.append(f"[Previous Output]\n{current_context['outputs']}")
+        
+        current_context["combined"] = "\n\n".join(parts) if parts else current_context.get("combined", "")
+        
+        return {
+            "context": current_context,
+            "web_search_results": search_result.get("results", []),
+            "web_search_count": results_count,
+        }
+        
+    except Exception as e:
+        logger.error(f"Web search failed: {e}")
+        await stage_end(deps, "web_search", success=False)
+        
+        if emitter:
+            await emitter.error("web_search", str(e))
+        
+        return {
+            "web_search_error": str(e),
+            "web_search_count": 0,
+        }
+
+
+# =============================================================================
+# NODE: SUMMARIZE
+# =============================================================================
+
+async def summarize(state: State, runtime) -> dict:
+    """Create comprehensive summary from all results."""
+    deps = runtime.context
+    
+    await stage_start(deps, "summarize", "Creating summary")
     
     query = get_query(state)
     
@@ -618,7 +648,7 @@ async def summarize(state: State, runtime) -> dict:
     
     results_text = "\n\n".join(parts) if parts else "No results available."
     
-    emit(deps, "summarize", "📝 Generating summary...")
+    await emit_async(deps, "progress", "summarize", "📝 Generating summary...")
     
     llm = get_llm(deps)
     
@@ -651,8 +681,7 @@ Include specific numbers and metrics where available."""
                 workflow_id=state.get("workflow_id", "default")
             )
         
-        if emitter:
-            emitter.stage_end("summarize", success=True)
+        await stage_end(deps, "summarize", success=True)
         
         logger.info("✅ Summary complete")
         
@@ -660,8 +689,7 @@ Include specific numbers and metrics where available."""
         
     except Exception as e:
         logger.error(f"Summary failed: {e}")
-        if emitter:
-            emitter.stage_end("summarize", success=False)
+        await stage_end(deps, "summarize", success=False)
         return {"summary": f"Summary generation failed: {e}"}
 
 
@@ -670,14 +698,10 @@ Include specific numbers and metrics where available."""
 # =============================================================================
 
 def answer_from_context(state: State, runtime) -> dict:
-    """
-    Answer directly from gathered context.
-    """
+    """Answer directly from gathered context."""
     deps = runtime.context
-    emitter = get_emitter(deps)
     
-    if emitter:
-        emitter.stage_start("answer", "Answering from context")
+    stage_start_sync(deps, "answer", "Answering from context")
     
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
@@ -703,15 +727,13 @@ Provide a clear, helpful answer based on the context."""
             HumanMessage(content=prompt),
         ])
         
-        if emitter:
-            emitter.stage_end("answer", success=True)
+        stage_end_sync(deps, "answer", success=True)
         
         return {"summary": response.content}
         
     except Exception as e:
         logger.error(f"Answer failed: {e}")
-        if emitter:
-            emitter.stage_end("answer", success=False)
+        stage_end_sync(deps, "answer", success=False)
         return {"summary": f"Failed to generate answer: {e}"}
 
 
@@ -720,9 +742,7 @@ Provide a clear, helpful answer based on the context."""
 # =============================================================================
 
 async def verify(state: State, runtime) -> dict:
-    """
-    Verify output completeness.
-    """
+    """Verify output completeness."""
     from .verification import verify_output
     return await verify_output(state, runtime)
 
@@ -773,6 +793,9 @@ def route_after_verify(state: State, runtime) -> str:
     elif action == "add_context":
         logger.info("➡️ Adding more context")
         return "gather_context"
+    elif action == "web_search":
+        logger.info("➡️ Searching web for more info")
+        return "web_search"
     elif action == "refine":
         logger.info("➡️ Refining summary")
         return "summarize"

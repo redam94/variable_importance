@@ -222,7 +222,7 @@ async def gather_context_with_agent(state: State, runtime) -> dict:
             
             def on_progress(msg):
                 if emitter:
-                    asyncio.run(emitter.stage_progress("gather_context", f"🌐 {msg}"))
+                    asyncio.run(emitter.stage_start("gather_context", f"🌐 {msg}"))
             
             search_result = await search_and_synthesize(
                 query=query,
