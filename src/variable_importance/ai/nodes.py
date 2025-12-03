@@ -56,20 +56,20 @@ def get_emitter(deps: Deps):
     return deps.get("emitter")
 
 
-def _run_async(coro):
-    """
-    Run async coroutine from sync context.
+# def _run_async(coro):
+#     """
+#     Run async coroutine from sync context.
     
-    Handles the case where we're already inside an event loop (FastAPI)
-    by scheduling the task instead of blocking.
-    """
-    try:
-        loop = asyncio.get_running_loop()
-        # Already in async context - schedule as task (fire-and-forget)
-        loop.create_task(coro)
-    except RuntimeError:
-        # No running loop - create one and run
-        asyncio.run(coro)
+#     Handles the case where we're already inside an event loop (FastAPI)
+#     by scheduling the task instead of blocking.
+#     """
+#     try:
+#         loop = asyncio.get_running_loop()
+#         # Already in async context - schedule as task (fire-and-forget)
+#         loop.create_task(coro)
+#     except RuntimeError:
+#         # No running loop - create one and run
+#         asyncio.run(coro)
 
 
 async def emit_async(deps: Deps, event_type: str, stage: str, message: str, data: Optional[Dict] = None):
@@ -79,7 +79,7 @@ async def emit_async(deps: Deps, event_type: str, stage: str, message: str, data
         await emitter.emit(event_type, stage, message, data)
 
 
-def emit(deps: Deps, stage: str, message: str, data: Optional[Dict] = None):
+async def emit(deps: Deps, stage: str, message: str, data: Optional[Dict] = None):
     """
     Emit progress event (sync wrapper).
     
@@ -88,7 +88,7 @@ def emit(deps: Deps, stage: str, message: str, data: Optional[Dict] = None):
     emitter = get_emitter(deps)
     if emitter:
         from ..utils.progress_events import EventType
-        _run_async(emitter.emit(str(EventType.PROGRESS), stage, message, data))
+        await emitter.emit(str(EventType.PROGRESS), stage, message, data)
 
 
 async def stage_start(deps: Deps, stage: str, description: str = ""):
@@ -105,18 +105,17 @@ async def stage_end(deps: Deps, stage: str, success: bool = True):
         await emitter.stage_end(stage, success)
 
 
-def stage_start_sync(deps: Deps, stage: str, description: str = ""):
-    """Signal stage start (sync wrapper)."""
-    emitter = get_emitter(deps)
+async def stage_start_sync(deps, stage, description):
+    emitter = deps.get("emitter")
     if emitter:
-        _run_async(emitter.stage_start(stage, description))
+        await emitter.stage_start(stage, description)
 
 
-def stage_end_sync(deps: Deps, stage: str, success: bool = True):
+async def stage_end_sync(deps: Deps, stage: str, success: bool = True):
     """Signal stage end (sync wrapper)."""
-    emitter = get_emitter(deps)
+    emitter = deps.get("emitter")
     if emitter:
-        _run_async(emitter.stage_end(stage, success))
+        await emitter.stage_end(stage, success)
 
 
 # =============================================================================
@@ -157,11 +156,11 @@ class PlanOutput(BaseModel):
     reasoning: str = Field(description="Why this approach")
 
 
-def plan(state: State, runtime) -> dict:
+async def plan(state: State, runtime) -> dict:
     """Create analysis plan and decide primary action."""
     deps = runtime.context
     
-    stage_start_sync(deps, "plan", "Creating analysis plan")
+    await stage_start_sync(deps, "plan", "Creating analysis plan")
     
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
@@ -188,7 +187,7 @@ Decide the primary action:
 
 Create specific, actionable steps. Be conservative - prefer execute over answer."""
 
-    emit(deps, "plan", "🧠 Analyzing query...")
+    await emit(deps, "plan", "🧠 Analyzing query...")
     
     try:
         result = llm.invoke([
@@ -196,8 +195,8 @@ Create specific, actionable steps. Be conservative - prefer execute over answer.
             HumanMessage(content=prompt),
         ])
         
-        emit(deps, "plan", f"📋 Action: {result.action}")
-        stage_end_sync(deps, "plan", success=True)
+        await emit(deps, "plan", f"📋 Action: {result.action}")
+        await stage_end_sync(deps, "plan", success=True)
         
         logger.info(f"🎯 Plan: {result.action} ({len(result.steps)} steps)")
         
@@ -209,7 +208,7 @@ Create specific, actionable steps. Be conservative - prefer execute over answer.
         
     except Exception as e:
         logger.error(f"Planning failed: {e}")
-        stage_end_sync(deps, "plan", success=False)
+        await stage_end_sync(deps, "plan", success=False)
         return {
             "plan": "Execute data analysis",
             "action": "execute",
@@ -521,7 +520,7 @@ async def web_search(state: State, runtime) -> dict:
         
         # Use sync callback wrapper since search_and_synthesize expects sync
         def sync_progress(msg: str):
-            _run_async(emit_async(deps, "progress", "web_search", f"🌐 {msg}"))
+            emitter.emit("progress", "web_search", f"🌐 {msg}")
         
         search_result = await search_and_synthesize(
             query=search_query,
@@ -697,18 +696,18 @@ Include specific numbers and metrics where available."""
 # NODE: ANSWER (from context only)
 # =============================================================================
 
-def answer_from_context(state: State, runtime) -> dict:
+async def answer_from_context(state: State, runtime) -> dict:
     """Answer directly from gathered context."""
     deps = runtime.context
     
-    stage_start_sync(deps, "answer", "Answering from context")
+    await stage_start_sync(deps, "answer", "Answering from context")
     
     query = get_query(state)
     context = state.get("context", {}).get("combined", "")
     
     llm = get_llm(deps)
     
-    emit(deps, "answer", "💬 Generating answer...")
+    await emit(deps, "answer", "💬 Generating answer...")
     
     prompt = f"""Answer the user's query using the available context.
 

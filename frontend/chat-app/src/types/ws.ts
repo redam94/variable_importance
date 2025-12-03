@@ -4,6 +4,7 @@
 
 export type WSMessageType =
   | 'connected'
+  | 'subscribed'
   | 'progress'
   | 'stage_start'
   | 'stage_end'
@@ -85,7 +86,7 @@ export interface RAGSearchGroup {
 }
 
 // =============================================================================
-// CHAT MESSAGE TYPES - Extended
+// CHAT MESSAGE TYPES - Extended for workflow chat
 // =============================================================================
 
 export type ChatMessageType = 'user' | 'assistant' | 'rag_search' | 'system'
@@ -96,60 +97,56 @@ export interface ChatMessage {
   role?: 'user' | 'assistant'
   content?: string
   ragGroup?: RAGSearchGroup
-  timestamp: string
+  timestamp?: string
 }
 
 // =============================================================================
-// HELPER: Build RAG groups from WebSocket events
+// HELPER FUNCTIONS
 // =============================================================================
 
+/**
+ * Update RAG groups map with incoming websocket message
+ */
 export function updateRAGGroups(
   groups: Map<string, RAGSearchGroup>,
-  message: WSMessage
+  msg: WSMessage
 ): Map<string, RAGSearchGroup> {
+  const eventId = msg.data?.event_id
+  if (!eventId) return groups
+
   const newGroups = new Map(groups)
-  const eventId = message.data?.event_id
 
-  if (!eventId) return newGroups
-
-  switch (message.type) {
-    case 'rag_search_start':
-      newGroups.set(eventId, {
-        event_id: eventId,
-        status: 'searching',
-        total_iterations: 0,
-        total_chunks: 0,
-        final_relevance: 0,
-        accepted: false,
-        queries: [],
-        timestamp: message.timestamp || new Date().toISOString(),
-      })
-      break
-
-    case 'rag_query': {
-      const group = newGroups.get(eventId)
-      if (group) {
-        group.queries.push({
-          query: message.data?.query || '',
-          iteration: message.data?.iteration || group.queries.length + 1,
-          chunks_found: message.data?.chunks_found || 0,
-          relevance: message.data?.relevance,
-        })
-        group.total_iterations = group.queries.length
+  if (msg.type === 'rag_search_start') {
+    newGroups.set(eventId, {
+      event_id: eventId,
+      status: 'searching',
+      total_iterations: 0,
+      total_chunks: 0,
+      final_relevance: 0,
+      accepted: false,
+      queries: [],
+      timestamp: msg.timestamp || new Date().toISOString(),
+    })
+  } else if (msg.type === 'rag_query') {
+    const existing = newGroups.get(eventId)
+    if (existing) {
+      const query: RAGQuery = {
+        query: msg.data?.query || '',
+        iteration: msg.data?.iteration || 0,
+        chunks_found: msg.data?.chunks_found || 0,
+        relevance: msg.data?.relevance,
       }
-      break
+      existing.queries.push(query)
+      existing.total_iterations = msg.data?.iteration || existing.total_iterations
     }
-
-    case 'rag_search_end': {
-      const endGroup = newGroups.get(eventId)
-      if (endGroup) {
-        endGroup.status = message.data?.accepted ? 'complete' : 'failed'
-        endGroup.total_iterations = message.data?.total_iterations || endGroup.queries.length
-        endGroup.total_chunks = message.data?.total_chunks || 0
-        endGroup.final_relevance = message.data?.final_relevance || 0
-        endGroup.accepted = message.data?.accepted || false
-      }
-      break
+  } else if (msg.type === 'rag_search_end') {
+    const existing = newGroups.get(eventId)
+    if (existing) {
+      existing.status = 'complete'
+      existing.total_iterations = msg.data?.total_iterations || existing.total_iterations
+      existing.total_chunks = msg.data?.total_chunks || 0
+      existing.final_relevance = msg.data?.final_relevance || 0
+      existing.accepted = msg.data?.accepted || false
     }
   }
 

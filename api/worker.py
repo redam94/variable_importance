@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional
 from arq import cron
 from arq.connections import RedisSettings
 from loguru import logger
+import redis.asyncio as redis
 
 # Add parent to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -57,66 +58,47 @@ def get_redis_settings() -> RedisSettings:
 # Worker Context
 # -----------------------------------------------------------------------------
 
-class WorkerContext:
-    """
-    Shared context for worker - initialized once on startup.
-    
-    Holds expensive resources like LLM connections, RAG instances.
-    """
-    
-    def __init__(self):
-        self.task_queue: Optional[TaskQueue] = None
-        self.workflow = None
-        self.executor = None
-        self._initialized = False
-    
-    async def initialize(self) -> None:
-        """Initialize worker resources."""
-        if self._initialized:
-            return
-        
-        logger.info("🚀 Initializing worker context...")
-        
-        # Task queue for status updates
-        self.task_queue = TaskQueue(redis_url=REDIS_URL)
-        await self.task_queue.connect()
-        
-        # Import and initialize workflow components
-        try:
-            from dependencies import WorkflowManager, settings
-            
-            self.workflow = WorkflowManager.get_workflow()
-            self.executor = WorkflowManager.get_executor()
-            self.settings = settings
-            
-            logger.info("✅ Workflow components loaded")
-        except ImportError as e:
-            logger.warning(f"Could not import workflow components: {e}")
-            logger.warning("Worker will run in stub mode")
-        
-        self._initialized = True
-        logger.info("✅ Worker context initialized")
-    
-    async def shutdown(self) -> None:
-        """Cleanup resources."""
-        if self.task_queue:
-            await self.task_queue.disconnect()
-        logger.info("👋 Worker context shutdown")
-
-
-# Global context
-_ctx = WorkerContext()
-
-
 async def startup(ctx: dict) -> None:
-    """arq startup hook - runs once when worker starts."""
-    await _ctx.initialize()
-    ctx["worker_ctx"] = _ctx
+    """
+    arq startup hook - runs once when worker starts.
+    
+    Creates Redis connection on the WORKER's event loop.
+    """
+    logger.info("🚀 Initializing worker...")
+    
+    # Create Redis connection on THIS event loop
+    ctx["redis"] = redis.from_url(REDIS_URL, decode_responses=True)
+    await ctx["redis"].ping()
+    logger.info("✅ Redis connected")
+    
+    # Create task queue with existing connection
+    ctx["task_queue"] = TaskQueue(redis_url=REDIS_URL)
+    ctx["task_queue"]._redis = ctx["redis"]  # Reuse connection
+    logger.info("✅ Task queue ready")
+    
+    # Import workflow components
+    try:
+        from dependencies import WorkflowManager, settings
+        
+        ctx["workflow"] = WorkflowManager.get_workflow()
+        ctx["executor"] = WorkflowManager.get_executor()
+        ctx["settings"] = settings
+        
+        logger.info("✅ Workflow components loaded")
+    except ImportError as e:
+        logger.warning(f"Could not import workflow components: {e}")
+        ctx["workflow"] = None
+        ctx["executor"] = None
+        ctx["settings"] = None
+    
+    logger.info("✅ Worker initialized")
 
 
 async def shutdown(ctx: dict) -> None:
     """arq shutdown hook - runs when worker stops."""
-    await _ctx.shutdown()
+    if ctx.get("redis"):
+        await ctx["redis"].close()
+    logger.info("👋 Worker shutdown")
 
 
 # -----------------------------------------------------------------------------
@@ -128,22 +110,33 @@ class WorkerEmitter:
     Emitter that publishes progress to Redis pub/sub.
     
     FastAPI subscribes and forwards to WebSocket clients.
+    
+    Uses Redis connection directly to avoid event loop issues.
     """
     
-    def __init__(self, task_queue: TaskQueue, task_id: str, workflow_id: str):
-        self.task_queue = task_queue
+    PROGRESS_CHANNEL = "task:{task_id}:progress"
+    
+    def __init__(self, redis_conn: redis.Redis, task_id: str, workflow_id: str):
+        self._redis = redis_conn
         self.task_id = task_id
         self.workflow_id = workflow_id
     
     async def emit(self, event_type: str, stage: str, message: str, data: Optional[dict] = None):
-        """Emit progress event."""
-        await self.task_queue.publish_progress(
-            task_id=self.task_id,
-            event_type=event_type,
-            stage=stage,
-            message=message,
-            data=data,
-        )
+        """Emit progress event via Redis pub/sub."""
+        import json
+        channel = self.PROGRESS_CHANNEL.format(task_id=self.task_id)
+        payload = {
+            "type": event_type,
+            "task_id": self.task_id,
+            "workflow_id": self.workflow_id,
+            "stage": stage,
+            "message": message,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if data:
+            payload["data"] = data
+        
+        await self._redis.publish(channel, json.dumps(payload))
     
     async def stage_start(self, stage: str, description: str = ""):
         await self.emit("stage_start", stage, description)
@@ -193,12 +186,14 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
     
     This is the main arq job function. It runs in the worker process,
     completely separate from FastAPI.
-    """
-    worker_ctx: WorkerContext = ctx.get("worker_ctx", _ctx)
-    task_queue = worker_ctx.task_queue
     
-    if not task_queue:
-        raise RuntimeError("Task queue not initialized")
+    ctx contains Redis connection and workflow components from startup().
+    """
+    redis_conn: redis.Redis = ctx["redis"]
+    task_queue: TaskQueue = ctx["task_queue"]
+    workflow = ctx.get("workflow")
+    executor = ctx.get("executor")
+    settings = ctx.get("settings")
     
     # Load task info from Redis
     task = await task_queue.get_task(task_id)
@@ -207,8 +202,8 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
     
     logger.info(f"🚀 Starting workflow: {task.workflow_id} (task: {task_id})")
     
-    # Create emitter for progress updates
-    emitter = WorkerEmitter(task_queue, task_id, task.workflow_id)
+    # Create emitter with Redis connection from ctx
+    emitter = WorkerEmitter(redis_conn, task_id, task.workflow_id)
     
     # Update status to running
     await task_queue.update_task(task_id, status=TaskStatus.RUNNING, progress=5)
@@ -228,7 +223,7 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
             return {"cancelled": True}
         
         # Check if workflow is available
-        if not worker_ctx.workflow:
+        if not workflow:
             raise RuntimeError("Workflow not initialized. Check worker startup logs.")
         
         # Initialize dependencies
@@ -262,13 +257,13 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
         from langchain.messages import HumanMessage
         
         deps = {
-            "executor": worker_ctx.executor,
+            "executor": executor,
             "output_manager": output_mgr,
             "rag": rag,
-            "llm": worker_ctx.settings.DEFAULT_MODEL,
-            "code_llm": worker_ctx.settings.CODE_MODEL,
-            "vision_llm": worker_ctx.settings.VISION_MODEL,
-            "base_url": worker_ctx.settings.OLLAMA_BASE_URL,
+            "llm": settings.DEFAULT_MODEL,
+            "code_llm": settings.CODE_MODEL,
+            "vision_llm": settings.VISION_MODEL,
+            "base_url": settings.OLLAMA_BASE_URL,
             "max_retries": 3,
             "emitter": emitter,
             "workflow_id": task.workflow_id,
@@ -291,7 +286,7 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
         await task_queue.update_task(task_id, current_node="executing", progress=25)
         
         # Main execution
-        result = await worker_ctx.workflow.ainvoke(initial_state, context=deps)
+        result = await workflow.ainvoke(initial_state, context=deps)
         
         # Checkpoint 4: Post-execution
         if await check_cancelled():
@@ -355,8 +350,8 @@ async def execute_workflow(ctx: dict, task_id: str) -> Dict[str, Any]:
 
 async def cleanup_old_tasks(ctx: dict) -> int:
     """Clean up completed tasks older than 7 days."""
-    worker_ctx: WorkerContext = ctx.get("worker_ctx", _ctx)
-    if not worker_ctx.task_queue:
+    task_queue = ctx.get("task_queue")
+    if not task_queue:
         return 0
     
     # Implementation would scan and delete old tasks

@@ -1,4 +1,18 @@
 // =============================================================================
+// RE-EXPORT WS TYPES for backwards compatibility
+// =============================================================================
+
+export type {
+  WSMessage,
+  WSMessageType,
+  WSMessageData,
+  RAGQuery,
+  RAGSearchGroup,
+  ChatMessage,
+  ChatMessageType,
+} from './ws'
+
+// =============================================================================
 // AUTH TYPES
 // =============================================================================
 
@@ -90,18 +104,13 @@ export interface Workflow {
 }
 
 // =============================================================================
-// CHAT TYPES
+// CHAT REQUEST TYPES (for API calls, not messages)
 // =============================================================================
-
-export interface ChatMessage {
-  role: 'user' | 'assistant'
-  content: string
-}
 
 export interface ChatRequest {
   workflow_id: string
   message: string
-  history?: ChatMessage[]
+  history?: Array<{ role: string; content: string }>
   model?: string
 }
 
@@ -197,9 +206,9 @@ export interface HealthResponse {
 
 export interface ImageInfo {
   filename: string
-  path: string       // Relative path from workflow root
+  path: string
   stage: string
-  url: string        // API URL to fetch the image (includes query param)
+  url: string
   size_bytes: number
 }
 

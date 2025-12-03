@@ -20,6 +20,7 @@ import {
   BookOpen,
   X,
   Image,
+  AlertCircle,
 } from 'lucide-react'
 import clsx from 'clsx'
 import type { ChatMessage as ChatMessageType } from '../types/ws'
@@ -28,8 +29,8 @@ export function WorkflowChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [showSettings, setShowSettings] = useState(false)
 
-  // Get workflowId from store (persisted)
-  const { workflowId } = useChatStore()
+  // Get state from global store (persisted)
+  const { workflowId, clearMessages: clearStoreMessages } = useChatStore()
 
   // Image state
   const [showImages, setShowImages] = useState(false)
@@ -37,7 +38,7 @@ export function WorkflowChatPage() {
   const [viewerIndex, setViewerIndex] = useState(0)
 
   // Fetch images
-  const { images, totalImages } = useWorkflowImages({
+  const { images, totalImages, loading: imagesLoading } = useWorkflowImages({
     workflowId,
     autoFetch: true,
   })
@@ -53,14 +54,14 @@ export function WorkflowChatPage() {
   const [ragEnabled, setRagEnabled] = useState(true)
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
 
-  // Use the workflow chat hook
+  // Use the workflow chat hook (now syncs with global store)
   const {
     isConnected,
     isRunning,
     messages,
-    wsMessages,
     currentStage,
     progress,
+    wsMessages,
     startedAt,
     currentTaskId,
     startWorkflow,
@@ -69,17 +70,12 @@ export function WorkflowChatPage() {
   } = useWorkflowChat({
     workflowId,
     onComplete: (taskId) => {
-      console.log('[Chat] ✅ Workflow complete:', taskId)
+      console.log('Workflow complete:', taskId)
     },
     onError: (error) => {
-      console.error('[Chat] ❌ Workflow error:', error)
+      console.error('Workflow error:', error)
     },
   })
-
-  // Debug log messages changes
-  useEffect(() => {
-    console.log('[Chat] 📝 Messages updated:', messages.length, messages)
-  }, [messages])
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -87,7 +83,6 @@ export function WorkflowChatPage() {
   }, [messages])
 
   const handleSend = async (query: string) => {
-    console.log('[Chat] 📤 Sending query:', query)
     try {
       const options: WorkflowOptions = {
         dataPath,
@@ -96,7 +91,7 @@ export function WorkflowChatPage() {
       }
       await startWorkflow(query, options)
     } catch (error) {
-      console.error('[Chat] Failed to start workflow:', error)
+      console.error('Failed to start workflow:', error)
     }
   }
 
@@ -135,9 +130,10 @@ export function WorkflowChatPage() {
   }, [])
 
   const handleClearAll = useCallback(() => {
+    clearStoreMessages()
     clearMessages()
     handleClearFile()
-  }, [clearMessages, handleClearFile])
+  }, [clearStoreMessages, clearMessages, handleClearFile])
 
   return (
     <div className="flex flex-col h-full bg-white">
@@ -168,7 +164,7 @@ export function WorkflowChatPage() {
             <button
               onClick={() => setShowImages(!showImages)}
               className={clsx(
-                'p-2 rounded-lg transition-colors flex items-center',
+                'p-2 rounded-lg transition-colors',
                 showImages ? 'bg-purple-100 text-purple-700' : 'hover:bg-gray-100 text-gray-600'
               )}
               title={`View ${totalImages} images`}
@@ -276,7 +272,7 @@ export function WorkflowChatPage() {
         </div>
       )}
 
-      {/* Progress panel - show when running or has recent activity */}
+      {/* Progress panel - now verbose with activity log */}
       {(isRunning || wsMessages.length > 0) && (
         <WorkflowProgressPanel
           stage={currentStage}
@@ -302,9 +298,6 @@ export function WorkflowChatPage() {
                   uploadSuccess={uploadSuccess}
                   accept=".csv,.xlsx,.xls,.json,.parquet"
                 />
-                <p className="text-center text-sm mt-4 text-gray-400">
-                  Or just start chatting - data file is optional
-                </p>
               </div>
             ) : (
               <>
