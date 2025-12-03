@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 import httpx
 from loguru import logger
+from task_queue import get_task_queue, shutdown_task_queue
 
 
 # =============================================================================
@@ -221,6 +222,12 @@ async def lifespan(app):
     """Manage startup and shutdown."""
     logger.info("🚀 Starting API...")
 
+    try:
+        await get_task_queue()
+        logger.info("✅ Task queue connected")
+    except Exception as e:
+        logger.warning(f"⚠️ Redis not available: {e}")
+
     # Initialize authentication
     from auth import init_auth
 
@@ -243,5 +250,6 @@ async def lifespan(app):
         logger.warning(f"⚠️ Ollama not reachable at {settings.OLLAMA_BASE_URL}")
 
     yield
-
+    
+    await shutdown_task_queue()
     logger.info("👋 Shutting down API...")

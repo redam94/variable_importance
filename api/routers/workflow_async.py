@@ -1,150 +1,34 @@
 """
-Workflow Router - Async execution with emitter injection.
+Workflow Async Router - Enqueues jobs to arq worker.
 
-Provides:
-- POST /workflow/run-async - Start workflow in background with WebSocket updates
-- GET /workflow/status/{task_id} - Check workflow task status
+Jobs execute in a separate worker process, not blocking FastAPI.
+
+Endpoints:
+- POST /workflow/run-async - Enqueue workflow job
+- GET /workflow/status/{task_id} - Get task status
+- POST /workflow/cancel/{task_id} - Cancel task
+- GET /workflow/tasks/{workflow_id} - List workflow tasks
+- GET /workflow/active - List all active tasks
 """
 
 import uuid
 from datetime import datetime
-from typing import Optional, Dict, Any, Annotated
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
+from fastapi import APIRouter, HTTPException, Depends
 from loguru import logger
-from langchain.messages import HumanMessage
 
 from schemas import WorkflowRequest, WorkflowStatus
-from dependencies import (
-    RAGManager,
-    WorkflowManager,
-    OutputManagerRegistry,
-    settings,
-)
 from auth import get_current_active_user, User
-from emitter import create_emitter, EventType
-from routers.websocket import manager as ws_manager
+from task_queue import get_task_queue, TaskQueue, TaskStatus
 
 
-router = APIRouter(prefix="/workflow", tags=["Workflow"])
-
-_running_tasks: Dict[str, Dict[str, Any]] = {}
+router = APIRouter(prefix="/workflow", tags=["Workflow Async"])
 
 
-async def execute_workflow_with_emitter(
-    task_id: str,
-    workflow_id: str,
-    query: str,
-    model: Optional[str],
-    stage_name: str,
-    data_path: Optional[str],
-    web_search_enabled: bool,
-    rag_enabled: bool,
-    username: str,
-):
-    """
-    Execute workflow in background with emitter for progress updates.
-    
-    The emitter is injected into the workflow deps, allowing nodes
-    to emit RAG search events, code generation updates, etc.
-    """
-    emitter = create_emitter(workflow_id, task_id, ws_manager)
-
-    _running_tasks[task_id] = {
-        "status": "running",
-        "workflow_id": workflow_id,
-        "started_at": datetime.now(),
-        "current_node": None,
-        "progress": 0,
-    }
-
-    try:
-        await emitter.emit(EventType.PROGRESS, "init", "Workflow starting...")
-
-        workflow = WorkflowManager.get_workflow()
-        if not workflow:
-            raise RuntimeError("Workflow not available")
-
-        executor = WorkflowManager.get_executor()
-        output_mgr = OutputManagerRegistry.get_output_manager(workflow_id)
-        
-        # Only initialize RAG if enabled
-        rag = None
-        if rag_enabled:
-            rag = await RAGManager.get_rag(workflow_id)
-
-        deps = {
-            "executor": executor,
-            "output_manager": output_mgr,
-            "rag": rag,
-            "llm": model or settings.DEFAULT_MODEL,
-            "code_llm": settings.CODE_MODEL,
-            "vision_llm": settings.VISION_MODEL,
-            "base_url": settings.OLLAMA_BASE_URL,
-            "max_retries": 3,
-            "emitter": emitter,
-            "workflow_id": workflow_id,
-            "user": username,
-        }
-
-        initial_state = {
-            "messages": [HumanMessage(content=query)],
-            "data_path": data_path or "",
-            "stage_name": stage_name,
-            "workflow_id": workflow_id,
-            "web_search_enabled": web_search_enabled,
-            "rag_enabled": rag_enabled,
-        }
-
-        logger.info(f"🚀 Running async workflow: {workflow_id}")
-        logger.info(f"   data_path: {data_path}")
-        logger.info(f"   rag_enabled: {rag_enabled}, web_search_enabled: {web_search_enabled}")
-
-        await emitter.stage_start("workflow", "Starting workflow...")
-
-        result = await workflow.ainvoke(initial_state, context=deps)
-
-        summary = result.get("summary", "")
-        action = result.get("action", "unknown")
-        error = result.get("error", "")
-
-        if error:
-            await emitter.error("workflow", error)
-
-        _running_tasks[task_id]["status"] = "completed"
-        _running_tasks[task_id]["progress"] = 100
-        _running_tasks[task_id]["completed_at"] = datetime.now()
-
-        await emitter.stage_end("workflow", success=not error)
-
-        await ws_manager.send_to_workflow(workflow_id, {
-            "type": "done",
-            "task_id": task_id,
-            "status": "completed" if not error else "error",
-            "summary": summary,
-            "action": action,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-        logger.info(f"✅ Async workflow completed: {workflow_id}")
-
-    except Exception as e:
-        logger.error(f"❌ Workflow failed: {e}")
-        import traceback
-        traceback.print_exc()
-
-        _running_tasks[task_id]["status"] = "failed"
-        _running_tasks[task_id]["error"] = str(e)
-
-        await emitter.error("workflow", str(e))
-
-        await ws_manager.send_to_workflow(workflow_id, {
-            "type": "error",
-            "task_id": task_id,
-            "message": str(e),
-            "timestamp": datetime.now().isoformat(),
-        })
-
+# -----------------------------------------------------------------------------
+# Endpoints
+# -----------------------------------------------------------------------------
 
 @router.post(
     "/run-async",
@@ -153,51 +37,43 @@ async def execute_workflow_with_emitter(
 )
 async def run_workflow_async(
     request: WorkflowRequest,
-    background_tasks: BackgroundTasks,
     current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
 ) -> WorkflowStatus:
     """
-    Start workflow execution in background.
+    Enqueue workflow for background execution.
 
-    Returns task_id immediately. Connect to WebSocket at
-    /ws/workflow/{workflow_id} to receive real-time updates.
-
-    Frontend flow:
-    1. POST /workflow/run-async -> get task_id
-    2. Connect WebSocket /ws/workflow/{workflow_id}
-    3. Receive events: stage_start, rag_query, rag_search_end, etc.
-    4. Poll /workflow/status/{task_id} for completion
+    The workflow runs in a SEPARATE WORKER PROCESS, not blocking FastAPI.
+    
+    Returns task_id immediately. Use:
+    - GET /workflow/status/{task_id} to poll status
+    - WebSocket /ws/workflow/{workflow_id} for real-time updates
+    - POST /workflow/cancel/{task_id} to cancel
+    
+    Requires worker to be running:
+        arq worker.WorkerSettings
     """
     task_id = f"task_{uuid.uuid4().hex[:12]}"
-    workflow_id = request.workflow_id
-
-    _running_tasks[task_id] = {
-        "status": "pending",
-        "workflow_id": workflow_id,
-        "created_at": datetime.now(),
-        "progress": 0,
-    }
-
-    logger.info(f"📋 Queuing workflow: {workflow_id}, data_path: {request.data_path}")
-
-    background_tasks.add_task(
-        execute_workflow_with_emitter,
+    
+    # Enqueue job - returns immediately
+    task = await task_queue.enqueue_workflow(
         task_id=task_id,
-        workflow_id=workflow_id,
+        workflow_id=request.workflow_id,
         query=request.query,
-        model=None,
+        username=current_user.username,
         stage_name=request.stage_name or "main",
         data_path=request.data_path,
         web_search_enabled=request.web_search_enabled,
         rag_enabled=request.rag_enabled,
-        username=current_user.username,
     )
-
+    
+    logger.info(f"📋 Enqueued: {request.workflow_id} -> {task_id}")
+    
     return WorkflowStatus(
         task_id=task_id,
-        workflow_id=workflow_id,
+        workflow_id=request.workflow_id,
         stage_name=request.stage_name or "main",
-        status="pending",
+        status=task.status.value,
         progress=0,
     )
 
@@ -205,29 +81,157 @@ async def run_workflow_async(
 @router.get(
     "/status/{task_id}",
     response_model=WorkflowStatus,
-    summary="Check workflow task status",
+    summary="Get task status",
 )
 async def get_task_status(
     task_id: str,
     current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
 ) -> WorkflowStatus:
-    """Get status of a running or completed workflow task."""
-    if task_id not in _running_tasks:
+    """Get current status of a workflow task."""
+    task = await task_queue.get_task(task_id)
+    
+    if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-
-    task = _running_tasks[task_id]
-
+    
+    # Calculate elapsed time
     elapsed = None
-    if task.get("started_at"):
-        end_time = task.get("completed_at", datetime.now())
-        elapsed = (end_time - task["started_at"]).total_seconds()
-
+    if task.started_at:
+        start = datetime.fromisoformat(task.started_at)
+        end = datetime.fromisoformat(task.completed_at) if task.completed_at else datetime.now()
+        elapsed = (end - start).total_seconds()
+    
     return WorkflowStatus(
         task_id=task_id,
-        workflow_id=task["workflow_id"],
-        stage_name="main",
-        status=task["status"],
-        current_node=task.get("current_node"),
-        progress=task.get("progress", 0),
+        workflow_id=task.workflow_id,
+        stage_name=task.stage_name,
+        status=task.status.value,
+        current_node=task.current_node,
+        progress=task.progress,
         elapsed_seconds=elapsed,
     )
+
+
+@router.post(
+    "/cancel/{task_id}",
+    summary="Cancel a running task",
+)
+async def cancel_task(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
+) -> dict:
+    """
+    Request cancellation of a task.
+    
+    For queued tasks: removes from queue immediately.
+    For running tasks: sets cancel flag, worker stops at next checkpoint.
+    """
+    task = await task_queue.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    # Ownership check
+    if task.username and task.username != current_user.username:
+        raise HTTPException(status_code=403, detail="Cannot cancel another user's task")
+    
+    success = await task_queue.request_cancel(task_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot cancel task in state: {task.status.value}"
+        )
+    
+    return {
+        "task_id": task_id,
+        "status": "cancelling",
+        "message": "Cancellation requested. Task will stop at next checkpoint.",
+    }
+
+
+@router.get(
+    "/tasks/{workflow_id}",
+    summary="List tasks for workflow",
+)
+async def list_workflow_tasks(
+    workflow_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
+) -> list[dict]:
+    """Get all tasks for a workflow, sorted newest first."""
+    tasks = await task_queue.get_workflow_tasks(workflow_id)
+    
+    return [
+        {
+            "task_id": t.task_id,
+            "status": t.status.value,
+            "progress": t.progress,
+            "current_node": t.current_node,
+            "created_at": t.created_at,
+            "started_at": t.started_at,
+            "completed_at": t.completed_at,
+            "error": t.error,
+            "result_summary": t.result_summary,
+            "username": t.username,
+        }
+        for t in tasks
+    ]
+
+
+@router.get(
+    "/active",
+    summary="List all active tasks",
+)
+async def list_active_tasks(
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
+) -> list[dict]:
+    """Get all running/pending/queued tasks."""
+    tasks = await task_queue.get_active_tasks()
+    
+    return [
+        {
+            "task_id": t.task_id,
+            "workflow_id": t.workflow_id,
+            "status": t.status.value,
+            "progress": t.progress,
+            "current_node": t.current_node,
+            "created_at": t.created_at,
+            "username": t.username,
+        }
+        for t in tasks
+    ]
+
+
+@router.get(
+    "/result/{task_id}",
+    summary="Get task result",
+)
+async def get_task_result(
+    task_id: str,
+    current_user: Annotated[User, Depends(get_current_active_user)],
+    task_queue: TaskQueue = Depends(get_task_queue),
+) -> dict:
+    """Get result of a completed task."""
+    task = await task_queue.get_task(task_id)
+    
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    if task.status not in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task not complete. Status: {task.status.value}"
+        )
+    
+    return {
+        "task_id": task_id,
+        "workflow_id": task.workflow_id,
+        "status": task.status.value,
+        "result_summary": task.result_summary,
+        "error": task.error,
+        "started_at": task.started_at,
+        "completed_at": task.completed_at,
+    }
