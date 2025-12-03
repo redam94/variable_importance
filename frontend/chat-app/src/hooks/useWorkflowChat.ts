@@ -1,5 +1,4 @@
 import { useCallback, useState, useRef, useEffect } from 'react'
-import { useWebSocket } from './useWebSocket'
 import { getStoredToken } from '../lib/api'
 import type { WSMessage, RAGSearchGroup, ChatMessage, RAGQuery } from '../types/ws'
 
@@ -41,8 +40,13 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
   const [currentStage, setCurrentStage] = useState<string | null>(null)
   const [progress, setProgress] = useState(0)
   const [isRunning, setIsRunning] = useState(false)
+  const [isConnected, setIsConnected] = useState(false)
   const [startedAt, setStartedAt] = useState<string | null>(null)
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
+
+  // WebSocket ref
+  const wsRef = useRef<WebSocket | null>(null)
+  const reconnectTimeoutRef = useRef<number | null>(null)
 
   // RAG groups tracking
   const ragGroupsRef = useRef<Map<string, RAGSearchGroup>>(new Map())
@@ -131,31 +135,34 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     // Handle done with summary
     if (msg.type === 'done') {
       console.log('[WS] ✅ DONE received!')
-      console.log('[WS] ✅ Summary:', msg.summary)
       console.log('[WS] ✅ Full message:', JSON.stringify(msg, null, 2))
 
       setIsRunning(false)
       setProgress(100)
       setCurrentStage('complete')
 
-      // Add assistant message with summary if present
-      if (msg.summary) {
+      // Get summary from various possible locations
+      const summary = msg.summary || msg.data?.summary || msg.data?.result_summary || msg.result_summary
+      console.log('[WS] ✅ Summary:', summary)
+
+      if (summary) {
         const assistantMessage: ChatMessage = {
           id: generateId(),
           type: 'assistant',
           role: 'assistant',
-          content: msg.summary,
+          content: summary,
           timestamp: new Date().toISOString(),
         }
         console.log('[WS] ➕ Adding assistant message:', assistantMessage)
-        setMessages(prev => {
-          console.log('[WS] Previous messages:', prev.length)
-          const newMessages = [...prev, assistantMessage]
-          console.log('[WS] New messages:', newMessages.length)
-          return newMessages
-        })
+        setMessages(prev => [...prev, assistantMessage])
       } else {
         console.log('[WS] ⚠️ No summary in done message!')
+      }
+
+      // Close WebSocket after done
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
       }
 
       onCompleteRef.current?.(msg.task_id || '')
@@ -165,20 +172,70 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     if (msg.type === 'error') {
       console.log('[WS] ❌ Error received:', msg.message)
       setIsRunning(false)
+      
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+      
       onErrorRef.current?.(msg.message || 'Unknown error')
     }
   }, [])
 
-  const { isConnected, reconnect } = useWebSocket({
-    workflowId,
-    onMessage: handleMessage,
-    onConnect: () => {
-      console.log('[WS] 🔌 Connected to workflow:', workflowId)
-    },
-    onDisconnect: () => {
-      console.log('[WS] 🔌 Disconnected from workflow:', workflowId)
-    },
-  })
+  // Connect to task WebSocket
+  const connectToTask = useCallback((taskId: string) => {
+    // Close existing connection
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+
+    const token = getStoredToken()
+    const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/task/${taskId}${token ? `?token=${token}` : ''}`
+
+    console.log('[WS] 🔌 Connecting to task WebSocket:', wsUrl)
+
+    const ws = new WebSocket(wsUrl)
+    wsRef.current = ws
+
+    ws.onopen = () => {
+      console.log('[WS] ✅ Task WebSocket opened')
+      setIsConnected(true)
+    }
+
+    ws.onmessage = (event) => {
+      console.log('[WS] 📨 Raw message received:', event.data)
+      try {
+        const message: WSMessage = JSON.parse(event.data)
+        handleMessage(message)
+      } catch (e) {
+        console.error('[WS] ❌ Failed to parse message:', event.data, e)
+      }
+    }
+
+    ws.onclose = (event) => {
+      console.log('[WS] 🔌 Task WebSocket closed:', event.code, event.reason)
+      setIsConnected(false)
+      wsRef.current = null
+    }
+
+    ws.onerror = (error) => {
+      console.error('[WS] ❌ WebSocket error:', error)
+    }
+  }, [handleMessage])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      if (wsRef.current) {
+        wsRef.current.close()
+        wsRef.current = null
+      }
+    }
+  }, [])
 
   const startWorkflow = useCallback(
     async (query: string, workflowOptions?: WorkflowOptions): Promise<string> => {
@@ -231,15 +288,21 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
         const data = await response.json()
         console.log('[Workflow] 📥 Response:', data)
 
-        setCurrentTaskId(data.task_id)
-        return data.task_id
+        const taskId = data.task_id
+        setCurrentTaskId(taskId)
+
+        // Connect to task-specific WebSocket for progress updates
+        console.log('[Workflow] 🔌 Connecting to task WebSocket for:', taskId)
+        connectToTask(taskId)
+
+        return taskId
       } catch (error) {
         console.error('[Workflow] ❌ Error:', error)
         setIsRunning(false)
         throw error
       }
     },
-    [workflowId]
+    [workflowId, connectToTask]
   )
 
   const clearMessages = useCallback(() => {
@@ -252,7 +315,18 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     setIsRunning(false)
     setStartedAt(null)
     setCurrentTaskId(null)
+    
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
   }, [])
+
+  const reconnect = useCallback(() => {
+    if (currentTaskId) {
+      connectToTask(currentTaskId)
+    }
+  }, [currentTaskId, connectToTask])
 
   return {
     // Connection state

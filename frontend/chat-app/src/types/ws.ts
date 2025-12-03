@@ -17,6 +17,7 @@ export type WSMessageType =
   | 'error'
   | 'done'
   | 'pong'
+  | 'test'
 
 export interface WSMessage {
   type: WSMessageType
@@ -29,7 +30,11 @@ export interface WSMessage {
   username?: string
   workflow_id?: string
   summary?: string
+  result_summary?: string
   action?: string
+  status?: string
+  progress?: number
+  error?: string
   data?: WSMessageData
 }
 

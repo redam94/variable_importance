@@ -5,11 +5,12 @@ Provides a protocol that workflow nodes use to emit events,
 with WebSocket implementation for real-time updates.
 """
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Protocol, runtime_checkable
+
+from loguru import logger
 
 
 class EventType(str, Enum):
@@ -126,6 +127,8 @@ class WebSocketEmitter:
         self.manager = manager
         self._current_stage: Optional[str] = None
         self._rag_event_id: Optional[str] = None
+        logger.info(f"📡 WebSocketEmitter created for workflow={workflow_id}, task={task_id}")
+        logger.info(f"📡 Manager type: {type(manager)}")
 
     async def emit(
         self,
@@ -135,8 +138,10 @@ class WebSocketEmitter:
         data: Optional[dict] = None,
     ) -> None:
         """Emit a progress event via WebSocket."""
+        event_str = event_type.value if isinstance(event_type, EventType) else str(event_type)
+        
         payload = {
-            "type": event_type.value if isinstance(event_type, EventType) else str(event_type),
+            "type": event_str,
             "task_id": self.task_id,
             "stage": stage,
             "message": message,
@@ -145,20 +150,31 @@ class WebSocketEmitter:
         if data:
             payload["data"] = data
 
-        await self.manager.send_to_workflow(self.workflow_id, payload)
+        logger.info(f"📡 Emitter.emit: type={event_str}, stage={stage}, msg={message[:50]}")
+        
+        try:
+            await self.manager.send_to_workflow(self.workflow_id, payload)
+            logger.info(f"📡 Emitter.emit: sent successfully")
+        except Exception as e:
+            logger.error(f"📡 Emitter.emit FAILED: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def stage_start(self, stage: str, description: str = "") -> None:
         self._current_stage = stage
+        logger.info(f"📡 stage_start: {stage} - {description}")
         await self.emit(EventType.STAGE_START, stage, description)
 
     async def stage_end(self, stage: str, success: bool = True) -> None:
         status = "completed" if success else "failed"
+        logger.info(f"📡 stage_end: {stage} - {status}")
         await self.emit(EventType.STAGE_END, stage, status)
         self._current_stage = None
 
     async def rag_search_start(self, stage: str) -> None:
         import uuid
         self._rag_event_id = f"rag_{uuid.uuid4().hex[:8]}"
+        logger.info(f"📡 rag_search_start: {stage}, event_id={self._rag_event_id}")
         await self.emit(
             EventType.RAG_SEARCH_START,
             stage,
@@ -174,6 +190,7 @@ class WebSocketEmitter:
         chunks_found: int,
         relevance: Optional[float] = None,
     ) -> None:
+        logger.info(f"📡 rag_query: iter={iteration}, chunks={chunks_found}")
         await self.emit(
             EventType.RAG_QUERY,
             stage,
@@ -196,6 +213,7 @@ class WebSocketEmitter:
         accepted: bool,
     ) -> None:
         status = "✅ Accepted" if accepted else "⚠️ Low relevance"
+        logger.info(f"📡 rag_search_end: chunks={total_chunks}, relevance={final_relevance}")
         await self.emit(
             EventType.RAG_SEARCH_END,
             stage,
@@ -211,17 +229,19 @@ class WebSocketEmitter:
         self._rag_event_id = None
 
     async def code_generated(self, stage: str, code: str, line_count: int) -> None:
+        logger.info(f"📡 code_generated: {line_count} lines")
         await self.emit(
             EventType.CODE_GENERATED,
             stage,
             f"Generated {line_count} lines",
-            {"code": code, "line_count": line_count},
+            {"code": code[:500], "line_count": line_count},
         )
 
     async def execution_result(
         self, stage: str, success: bool, output: str = ""
     ) -> None:
         status = "success" if success else "error"
+        logger.info(f"📡 execution_result: {status}")
         await self.emit(
             EventType.EXECUTION_RESULT,
             stage,
@@ -230,6 +250,7 @@ class WebSocketEmitter:
         )
 
     async def error(self, stage: str, error: str) -> None:
+        logger.error(f"📡 error: {stage} - {error[:100]}")
         await self.emit(EventType.ERROR, stage, error, {"error": error})
 
 
@@ -270,6 +291,8 @@ def create_emitter(
     manager=None,
 ) -> WorkflowEmitter:
     """Factory function for creating appropriate emitter."""
+    logger.info(f"📡 create_emitter called: workflow={workflow_id}, task={task_id}, manager={manager is not None}")
     if manager is not None:
         return WebSocketEmitter(workflow_id, task_id, manager)
+    logger.warning(f"📡 No manager provided, using NullEmitter")
     return NullEmitter()

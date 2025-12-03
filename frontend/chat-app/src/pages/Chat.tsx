@@ -145,15 +145,22 @@ export function WorkflowChatPage() {
       <div className="flex items-center justify-between px-6 py-3 border-b border-gray-200 bg-white">
         <div className="flex items-center gap-3">
           <h1 className="text-lg font-semibold text-gray-900">Workflow Chat</h1>
-          <div
-            className={clsx(
-              'flex items-center gap-1 px-2 py-0.5 rounded-full text-xs',
-              isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
-            )}
-          >
-            {isConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-            {isConnected ? 'Connected' : 'Disconnected'}
-          </div>
+          {/* Connection status - only show during active workflow */}
+          {isRunning ? (
+            <div
+              className={clsx(
+                'flex items-center gap-1 px-2 py-0.5 rounded-full text-xs',
+                isConnected ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'
+              )}
+            >
+              {isConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
+              {isConnected ? 'Connected' : 'Connecting...'}
+            </div>
+          ) : (
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-600">
+              Ready
+            </div>
+          )}
           {isRunning && currentTaskId && (
             <div className="flex items-center gap-1 px-2 py-0.5 rounded-full text-xs bg-blue-100 text-blue-700">
               <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
@@ -178,7 +185,8 @@ export function WorkflowChatPage() {
             </button>
           )}
 
-          {!isConnected && (
+          {/* Only show reconnect when running but disconnected */}
+          {isRunning && !isConnected && (
             <button
               onClick={reconnect}
               className="p-2 hover:bg-gray-100 rounded-lg text-gray-600"
@@ -332,15 +340,13 @@ export function WorkflowChatPage() {
       <ChatInput
         onSend={handleSend}
         isLoading={isRunning}
-        disabled={!isConnected}
+        disabled={false}
         placeholder={
-          !isConnected
-            ? 'Reconnecting...'
-            : isRunning
-              ? 'Waiting for response...'
-              : dataPath
-                ? `Ask about ${dataFile?.name}...`
-                : 'Ask about your data...'
+          isRunning
+            ? 'Waiting for response...'
+            : dataPath
+              ? `Ask about ${dataFile?.name}...`
+              : 'Ask about your data...'
         }
       />
     </div>

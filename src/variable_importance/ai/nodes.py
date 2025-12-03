@@ -726,13 +726,13 @@ Provide a clear, helpful answer based on the context."""
             HumanMessage(content=prompt),
         ])
         
-        stage_end_sync(deps, "answer", success=True)
+        await stage_end_sync(deps, "answer", success=True)
         
         return {"summary": response.content}
         
     except Exception as e:
         logger.error(f"Answer failed: {e}")
-        stage_end_sync(deps, "answer", success=False)
+        await stage_end_sync(deps, "answer", success=False)
         return {"summary": f"Failed to generate answer: {e}"}
 
 
