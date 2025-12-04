@@ -1,5 +1,17 @@
-import { useCallback, useState, useRef, useEffect } from 'react'
+import { useCallback, useRef, useEffect } from 'react'
 import { getStoredToken } from '../lib/api'
+import {
+  useChatStore,
+  selectMessages,
+  selectWsMessages,
+  selectIsRunning,
+  selectWorkflowId,
+  selectCurrentTaskId,
+  selectCurrentStage,
+  selectProgress,
+  selectStartedAt,
+  selectRagGroups,
+} from '../stores/chatStore'
 import type { WSMessage, RAGSearchGroup, ChatMessage, RAGQuery } from '../types/ws'
 
 // =============================================================================
@@ -13,7 +25,7 @@ export interface WorkflowOptions {
 }
 
 interface UseWorkflowChatOptions {
-  workflowId: string
+  pageType: string
   onComplete?: (taskId: string) => void
   onError?: (error: string) => void
 }
@@ -32,28 +44,44 @@ function generateId(): string {
 // =============================================================================
 
 export function useWorkflowChat(options: UseWorkflowChatOptions) {
-  const { workflowId, onComplete, onError } = options
+  const { pageType, onComplete, onError } = options
 
-  // Local state for messages and progress
-  const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [wsMessages, setWsMessages] = useState<WSMessage[]>([])
-  const [currentStage, setCurrentStage] = useState<string | null>(null)
-  const [progress, setProgress] = useState(0)
-  const [isRunning, setIsRunning] = useState(false)
-  const [isConnected, setIsConnected] = useState(false)
-  const [startedAt, setStartedAt] = useState<string | null>(null)
-  const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
+  // Get state using selectors (prevents unnecessary re-renders)
+  const messages = useChatStore(selectMessages(pageType))
+  const wsMessages = useChatStore(selectWsMessages(pageType))
+  const isRunning = useChatStore(selectIsRunning(pageType))
+  const workflowId = useChatStore(selectWorkflowId(pageType))
+  const currentTaskId = useChatStore(selectCurrentTaskId(pageType))
+  const currentStage = useChatStore(selectCurrentStage(pageType))
+  const progress = useChatStore(selectProgress(pageType))
+  const startedAt = useChatStore(selectStartedAt(pageType))
+  const ragGroups = useChatStore(selectRagGroups(pageType))
+
+  // Get actions directly from store (stable references)
+  const initSession = useChatStore((state) => state.initSession)
+  const loadWorkflow = useChatStore((state) => state.loadWorkflow)
+  const newSession = useChatStore((state) => state.newSession)
+  const addMessage = useChatStore((state) => state.addMessage)
+  const addWsMessage = useChatStore((state) => state.addWsMessage)
+  const storeClearMessages = useChatStore((state) => state.clearMessages)
+  const startWorkflowRun = useChatStore((state) => state.startWorkflowRun)
+  const updateWorkflowProgress = useChatStore((state) => state.updateWorkflowProgress)
+  const completeWorkflowRun = useChatStore((state) => state.completeWorkflowRun)
+  const failWorkflowRun = useChatStore((state) => state.failWorkflowRun)
+  const updateRagGroup = useChatStore((state) => state.updateRagGroup)
+
+  // Initialize session on mount (only if doesn't exist)
+  useEffect(() => {
+    initSession(pageType)
+  }, [pageType, initSession])
 
   // WebSocket ref
   const wsRef = useRef<WebSocket | null>(null)
-  const reconnectTimeoutRef = useRef<number | null>(null)
 
-  // RAG groups tracking
-  const ragGroupsRef = useRef<Map<string, RAGSearchGroup>>(new Map())
-
-  // Store callbacks in refs to avoid stale closures
+  // Store callbacks in refs
   const onCompleteRef = useRef(onComplete)
   const onErrorRef = useRef(onError)
+  const ragGroupsRef = useRef(ragGroups)
 
   useEffect(() => {
     onCompleteRef.current = onComplete
@@ -63,32 +91,30 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     onErrorRef.current = onError
   }, [onError])
 
+  useEffect(() => {
+    ragGroupsRef.current = ragGroups
+  }, [ragGroups])
+
   // Handle incoming websocket messages
   const handleMessage = useCallback((msg: WSMessage) => {
     console.log('[WS] 📨 Received message:', msg.type, msg)
 
-    // Store all WS messages for activity log
-    setWsMessages(prev => [...prev.slice(-49), msg])
+    addWsMessage(pageType, msg)
 
-    // Update stage from message
     if (msg.stage) {
-      console.log('[WS] 📍 Stage update:', msg.stage)
-      setCurrentStage(msg.stage)
+      updateWorkflowProgress(pageType, { currentStage: msg.stage })
     }
 
-    // Update progress from message data
     if (msg.data?.progress !== undefined) {
-      console.log('[WS] 📊 Progress update:', msg.data.progress)
-      setProgress(Number(msg.data.progress))
+      updateWorkflowProgress(pageType, { progress: Number(msg.data.progress) })
     }
 
-    // Handle RAG events - group them
+    // Handle RAG events
     if (msg.type === 'rag_search_start' || msg.type === 'rag_query' || msg.type === 'rag_search_end') {
       const eventId = msg.data?.event_id || 'default'
-      console.log('[WS] 🔍 RAG event:', msg.type, 'eventId:', eventId)
 
       if (msg.type === 'rag_search_start') {
-        ragGroupsRef.current.set(eventId, {
+        const group: RAGSearchGroup = {
           event_id: eventId,
           status: 'searching',
           total_iterations: 0,
@@ -97,9 +123,10 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
           accepted: false,
           queries: [],
           timestamp: msg.timestamp || new Date().toISOString(),
-        })
+        }
+        updateRagGroup(pageType, eventId, group)
       } else if (msg.type === 'rag_query') {
-        const existing = ragGroupsRef.current.get(eventId)
+        const existing = ragGroupsRef.current[eventId]
         if (existing) {
           const query: RAGQuery = {
             query: msg.data?.query || '',
@@ -107,44 +134,42 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
             chunks_found: msg.data?.chunks_found || 0,
             relevance: msg.data?.relevance,
           }
-          existing.queries.push(query)
-          existing.total_iterations = msg.data?.iteration || existing.total_iterations
+          updateRagGroup(pageType, eventId, {
+            ...existing,
+            queries: [...existing.queries, query],
+            total_iterations: msg.data?.iteration || existing.total_iterations,
+          })
         }
       } else if (msg.type === 'rag_search_end') {
-        const existing = ragGroupsRef.current.get(eventId)
+        const existing = ragGroupsRef.current[eventId]
         if (existing) {
-          existing.status = 'complete'
-          existing.total_iterations = msg.data?.total_iterations || existing.total_iterations
-          existing.total_chunks = msg.data?.total_chunks || 0
-          existing.final_relevance = msg.data?.final_relevance || 0
-          existing.accepted = msg.data?.accepted || false
+          const completed: RAGSearchGroup = {
+            ...existing,
+            status: 'complete',
+            total_iterations: msg.data?.total_iterations || existing.total_iterations,
+            total_chunks: msg.data?.total_chunks || 0,
+            final_relevance: msg.data?.final_relevance || 0,
+            accepted: msg.data?.accepted || false,
+          }
+          updateRagGroup(pageType, eventId, completed)
 
-          // Add RAG message to chat when search completes
           const ragMessage: ChatMessage = {
             id: generateId(),
             type: 'rag_search',
-            ragGroup: { ...existing },
-            timestamp: existing.timestamp,
+            ragGroup: completed,
+            timestamp: completed.timestamp,
           }
-          console.log('[WS] ➕ Adding RAG message:', ragMessage)
-          setMessages(prev => [...prev, ragMessage])
+          addMessage(pageType, ragMessage)
         }
       }
     }
 
-    // Handle done with summary
+    // Handle done
     if (msg.type === 'done') {
       console.log('[WS] ✅ DONE received!')
-      console.log('[WS] ✅ Full message:', JSON.stringify(msg, null, 2))
+      completeWorkflowRun(pageType)
 
-      setIsRunning(false)
-      setProgress(100)
-      setCurrentStage('complete')
-
-      // Get summary from various possible locations
       const summary = msg.summary || msg.data?.summary || msg.data?.result_summary || msg.result_summary
-      console.log('[WS] ✅ Summary:', summary)
-
       if (summary) {
         const assistantMessage: ChatMessage = {
           id: generateId(),
@@ -153,13 +178,9 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
           content: summary,
           timestamp: new Date().toISOString(),
         }
-        console.log('[WS] ➕ Adding assistant message:', assistantMessage)
-        setMessages(prev => [...prev, assistantMessage])
-      } else {
-        console.log('[WS] ⚠️ No summary in done message!')
+        addMessage(pageType, assistantMessage)
       }
 
-      // Close WebSocket after done
       if (wsRef.current) {
         wsRef.current.close()
         wsRef.current = null
@@ -171,20 +192,19 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     // Handle errors
     if (msg.type === 'error') {
       console.log('[WS] ❌ Error received:', msg.message)
-      setIsRunning(false)
-      
+      failWorkflowRun(pageType)
+
       if (wsRef.current) {
         wsRef.current.close()
         wsRef.current = null
       }
-      
+
       onErrorRef.current?.(msg.message || 'Unknown error')
     }
-  }, [])
+  }, [pageType, addMessage, addWsMessage, updateWorkflowProgress, completeWorkflowRun, failWorkflowRun, updateRagGroup])
 
   // Connect to task WebSocket
   const connectToTask = useCallback((taskId: string) => {
-    // Close existing connection
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -200,11 +220,9 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
 
     ws.onopen = () => {
       console.log('[WS] ✅ Task WebSocket opened')
-      setIsConnected(true)
     }
 
     ws.onmessage = (event) => {
-      console.log('[WS] 📨 Raw message received:', event.data)
       try {
         const message: WSMessage = JSON.parse(event.data)
         handleMessage(message)
@@ -215,7 +233,6 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
 
     ws.onclose = (event) => {
       console.log('[WS] 🔌 Task WebSocket closed:', event.code, event.reason)
-      setIsConnected(false)
       wsRef.current = null
     }
 
@@ -224,24 +241,25 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     }
   }, [handleMessage])
 
-  // Cleanup on unmount
+  // Reconnect to existing task if running
   useEffect(() => {
+    if (isRunning && currentTaskId && !wsRef.current) {
+      console.log('[WS] 🔄 Reconnecting to existing task:', currentTaskId)
+      connectToTask(currentTaskId)
+    }
+
     return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current)
-      }
-      if (wsRef.current) {
+      if (!isRunning && wsRef.current) {
         wsRef.current.close()
         wsRef.current = null
       }
     }
-  }, [])
+  }, [isRunning, currentTaskId, connectToTask])
 
   const startWorkflow = useCallback(
     async (query: string, workflowOptions?: WorkflowOptions): Promise<string> => {
       console.log('[Workflow] 🚀 Starting workflow with query:', query)
 
-      // Add user message
       const userMessage: ChatMessage = {
         id: generateId(),
         type: 'user',
@@ -249,20 +267,10 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
         content: query,
         timestamp: new Date().toISOString(),
       }
-      setMessages(prev => [...prev, userMessage])
-
-      // Clear RAG groups and reset state
-      ragGroupsRef.current.clear()
-      setWsMessages([])
-      setIsRunning(true)
-      setProgress(0)
-      setCurrentStage(null)
-      setStartedAt(new Date().toISOString())
+      addMessage(pageType, userMessage)
 
       try {
         const token = getStoredToken()
-        console.log('[Workflow] 📤 Sending request to /api/workflow/run-async')
-
         const response = await fetch('/api/workflow/run-async', {
           method: 'POST',
           headers: {
@@ -280,47 +288,32 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
 
         if (!response.ok) {
           const error = await response.text()
-          console.log('[Workflow] ❌ Request failed:', error)
-          setIsRunning(false)
           throw new Error(error)
         }
 
         const data = await response.json()
-        console.log('[Workflow] 📥 Response:', data)
-
         const taskId = data.task_id
-        setCurrentTaskId(taskId)
 
-        // Connect to task-specific WebSocket for progress updates
-        console.log('[Workflow] 🔌 Connecting to task WebSocket for:', taskId)
+        startWorkflowRun(pageType, taskId)
         connectToTask(taskId)
 
         return taskId
       } catch (error) {
         console.error('[Workflow] ❌ Error:', error)
-        setIsRunning(false)
+        failWorkflowRun(pageType)
         throw error
       }
     },
-    [workflowId, connectToTask]
+    [pageType, workflowId, connectToTask, addMessage, startWorkflowRun, failWorkflowRun]
   )
 
   const clearMessages = useCallback(() => {
-    console.log('[Workflow] 🧹 Clearing messages')
-    setMessages([])
-    setWsMessages([])
-    ragGroupsRef.current.clear()
-    setCurrentStage(null)
-    setProgress(0)
-    setIsRunning(false)
-    setStartedAt(null)
-    setCurrentTaskId(null)
-    
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
     }
-  }, [])
+    storeClearMessages(pageType)
+  }, [pageType, storeClearMessages])
 
   const reconnect = useCallback(() => {
     if (currentTaskId) {
@@ -328,25 +321,40 @@ export function useWorkflowChat(options: UseWorkflowChatOptions) {
     }
   }, [currentTaskId, connectToTask])
 
+  // Load a different workflow (clears current session)
+  const switchWorkflow = useCallback((newWorkflowId: string) => {
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    loadWorkflow(pageType, newWorkflowId)
+  }, [pageType, loadWorkflow])
+
+  // Start fresh session with new workflow ID
+  const startNewSession = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close()
+      wsRef.current = null
+    }
+    newSession(pageType)
+  }, [pageType, newSession])
+
+  const isConnected = wsRef.current?.readyState === WebSocket.OPEN
+
   return {
-    // Connection state
+    workflowId,
     isConnected,
     reconnect,
-
-    // Workflow state
     isRunning,
     currentStage,
     progress,
     startedAt,
     currentTaskId,
-
-    // Messages
     messages,
     wsMessages,
-
-    // Actions
     startWorkflow,
     clearMessages,
-    workflowId,
+    switchWorkflow,
+    startNewSession,
   }
 }

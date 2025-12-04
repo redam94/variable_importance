@@ -1,6 +1,5 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { useWorkflowChat, type WorkflowOptions } from '../hooks/useWorkflowChat'
-import { useChatStore } from '../stores/chatStore'
 import { workflowApi } from '../lib/api'
 import { ChatMessage } from '../components/chat/ChatMessage'
 import { RAGAgentMessage } from '../components/chat/RAGAgentMessage'
@@ -20,6 +19,7 @@ import {
   BookOpen,
   X,
   Image,
+  FolderOpen,
 } from 'lucide-react'
 import clsx from 'clsx'
 import type { ChatMessage as ChatMessageType } from '../types/ws'
@@ -28,13 +28,34 @@ export function WorkflowChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const [showSettings, setShowSettings] = useState(false)
 
-  // Get workflowId from store (persisted)
-  const { workflowId } = useChatStore()
-
   // Image state
   const [showImages, setShowImages] = useState(false)
   const [viewerOpen, setViewerOpen] = useState(false)
   const [viewerIndex, setViewerIndex] = useState(0)
+
+  // Use the workflow chat hook with page type for separate state
+  const {
+    workflowId,
+    isConnected,
+    isRunning,
+    messages,
+    wsMessages,
+    currentStage,
+    progress,
+    startedAt,
+    currentTaskId,
+    startWorkflow,
+    clearMessages,
+    reconnect,
+  } = useWorkflowChat({
+    pageType: 'workflow-chat', // Unique key for this page's chat state
+    onComplete: (taskId) => {
+      console.log('[Chat] ✅ Workflow complete:', taskId)
+    },
+    onError: (error) => {
+      console.error('[Chat] ❌ Workflow error:', error)
+    },
+  })
 
   // Fetch images
   const { images, totalImages } = useWorkflowImages({
@@ -53,32 +74,9 @@ export function WorkflowChatPage() {
   const [ragEnabled, setRagEnabled] = useState(true)
   const [webSearchEnabled, setWebSearchEnabled] = useState(false)
 
-  // Use the workflow chat hook
-  const {
-    isConnected,
-    isRunning,
-    messages,
-    wsMessages,
-    currentStage,
-    progress,
-    startedAt,
-    currentTaskId,
-    startWorkflow,
-    clearMessages,
-    reconnect,
-  } = useWorkflowChat({
-    workflowId,
-    onComplete: (taskId) => {
-      console.log('[Chat] ✅ Workflow complete:', taskId)
-    },
-    onError: (error) => {
-      console.error('[Chat] ❌ Workflow error:', error)
-    },
-  })
-
   // Debug log messages changes
   useEffect(() => {
-    console.log('[Chat] 📝 Messages updated:', messages.length, messages)
+    console.log('[Chat] 📝 Messages updated:', messages?.length ?? 0, messages)
   }, [messages])
 
   // Auto-scroll on new messages
@@ -144,7 +142,13 @@ export function WorkflowChatPage() {
       {/* Header */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-gray-200 bg-white">
         <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-gray-900">Workflow Chat</h1>
+          <div>
+            <h1 className="text-lg font-semibold text-gray-900">Workflow Chat</h1>
+            <div className="flex items-center gap-1 text-xs text-gray-500">
+              <FolderOpen size={12} />
+              <span>{workflowId || 'No workflow'}</span>
+            </div>
+          </div>
           {/* Connection status - only show during active workflow */}
           {isRunning ? (
             <div
@@ -218,7 +222,7 @@ export function WorkflowChatPage() {
       </div>
 
       {/* Image gallery (collapsible) */}
-      {showImages && images.length > 0 && (
+      {showImages && (images?.length ?? 0) > 0 && (
         <div className="border-b border-gray-200 p-4 bg-gray-50">
           <ImageGrid
             images={images}
@@ -285,7 +289,7 @@ export function WorkflowChatPage() {
       )}
 
       {/* Progress panel - show when running or has recent activity */}
-      {(isRunning || wsMessages.length > 0) && (
+      {(isRunning || (wsMessages?.length ?? 0) > 0) && (
         <WorkflowProgressPanel
           stage={currentStage}
           progress={progress}
@@ -297,7 +301,7 @@ export function WorkflowChatPage() {
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto bg-gray-50">
-        {messages.length === 0 ? (
+        {(!messages || messages.length === 0) ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500 p-8">
             {/* File upload zone when no messages */}
             {!dataPath ? (
@@ -327,7 +331,7 @@ export function WorkflowChatPage() {
           </div>
         ) : (
           <div className="divide-y divide-gray-100">
-            {messages.map((message) => (
+            {(messages || []).map((message) => (
               <MessageRenderer key={message.id} message={message} />
             ))}
 

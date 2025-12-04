@@ -63,6 +63,7 @@ def build_workflow_v2() -> StateGraph:
     
     # Add nodes
     graph.add_node("gather_context", gather_context)
+    graph.add_node("plan_initial", plan)
     graph.add_node("plan", plan)
     graph.add_node("execute", execute)
     graph.add_node("analyze_plots", analyze_plots)
@@ -78,7 +79,8 @@ def build_workflow_v2() -> StateGraph:
     graph.add_node("increment_retry", increment_retry)
     
     # Main flow
-    graph.add_edge(START, "gather_context")
+    graph.add_edge(START, "plan_initial")
+    graph.add_edge("plan_initial", "gather_context")
     graph.add_edge("gather_context", "plan")
     
     # Route based on plan decision

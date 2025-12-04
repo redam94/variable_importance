@@ -217,10 +217,20 @@ function StageIndicator({
   )
 }
 
-function ActivityItem({ message }: { message: WSMessage }) {
-  const icon = MESSAGE_ICONS[message.type] || MESSAGE_ICONS[message.event || ''] || (
+function ActivityItem({ message, isRunning }: { message: WSMessage; isRunning: boolean }) {
+  // When workflow is done, show checkmarks instead of spinners
+  let icon = MESSAGE_ICONS[message.type] || MESSAGE_ICONS[message.event || ''] || (
     <Loader2 size={12} className="text-gray-400" />
   )
+  
+  // Replace spinners with checkmarks when workflow is complete
+  if (!isRunning) {
+    const spinnerTypes = ['progress', 'stage_start', 'execution_start', 'rag_search_start']
+    if (spinnerTypes.includes(message.type) || spinnerTypes.includes(message.event || '')) {
+      icon = <CheckCircle2 size={12} className="text-green-500" />
+    }
+  }
+  
   const text = getMessageText(message)
   const time = message.timestamp ? formatTimestamp(message.timestamp) : ''
 
@@ -248,16 +258,34 @@ export function WorkflowProgressPanel({
   const [showActivity, setShowActivity] = useState(true)
   const [elapsed, setElapsed] = useState('0s')
 
-  // Update elapsed time
+  // Calculate elapsed time
   useEffect(() => {
-    if (!isRunning || !startedAt) return
+    if (!startedAt) return
 
+    // If not running, calculate final elapsed from last message or current time
+    if (!isRunning) {
+      // Use last message timestamp if available, otherwise current time
+      const lastMsg = wsMessages[wsMessages.length - 1]
+      const endTime = lastMsg?.timestamp ? new Date(lastMsg.timestamp).getTime() : Date.now()
+      const duration = Math.floor((endTime - new Date(startedAt).getTime()) / 1000)
+      if (duration < 60) {
+        setElapsed(`${duration}s`)
+      } else {
+        const mins = Math.floor(duration / 60)
+        const secs = duration % 60
+        setElapsed(`${mins}m ${secs}s`)
+      }
+      return
+    }
+
+    // While running, update every second
+    setElapsed(formatElapsed(startedAt))
     const interval = setInterval(() => {
       setElapsed(formatElapsed(startedAt))
     }, 1000)
 
     return () => clearInterval(interval)
-  }, [isRunning, startedAt])
+  }, [isRunning, startedAt, wsMessages])
 
   // Filter relevant messages for activity log (skip pongs, etc.)
   const activityMessages = useMemo(() => {
@@ -343,7 +371,7 @@ export function WorkflowProgressPanel({
       {showActivity && activityMessages.length > 0 && (
         <div className="max-h-40 overflow-y-auto border-t border-gray-100">
           {activityMessages.map((msg, i) => (
-            <ActivityItem key={`${msg.timestamp}-${i}`} message={msg} />
+            <ActivityItem key={`${msg.timestamp}-${i}`} message={msg} isRunning={isRunning} />
           ))}
         </div>
       )}

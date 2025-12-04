@@ -1,5 +1,5 @@
-import { useState, useCallback } from 'react'
-import { useChatStore } from '../stores/chatStore'
+import { useState, useCallback, useEffect } from 'react'
+import { useChatStore, selectCurrentWorkflowId } from '../stores/chatStore'
 import { chatApi } from '../lib/api'
 import type { RAGChunk, RAGStats } from '../types/api'
 import {
@@ -7,23 +7,30 @@ import {
   Loader2,
   FileText,
   Database,
-  Percent,
   ChevronDown,
   ChevronUp,
   RefreshCw,
+  FolderOpen,
 } from 'lucide-react'
 import clsx from 'clsx'
-import { useEffect } from 'react'
 
 export function RAGSearchPage() {
-  const { workflowId } = useChatStore()
+  const workflowId = useChatStore(selectCurrentWorkflowId)
+  const initSession = useChatStore((state) => state.initSession)
+  
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<RAGChunk[]>([])
   const [stats, setStats] = useState<RAGStats | null>(null)
   const [loading, setLoading] = useState(false)
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null)
   
+  // Init session on mount
+  useEffect(() => {
+    initSession('workflow-chat')
+  }, [initSession])
+  
   const fetchStats = useCallback(async () => {
+    if (!workflowId) return
     try {
       const data = await chatApi.getRAGStats(workflowId)
       setStats(data)
@@ -38,7 +45,7 @@ export function RAGSearchPage() {
   
   const handleSearch = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!query.trim()) return
+    if (!query.trim() || !workflowId) return
     
     setLoading(true)
     try {
@@ -49,7 +56,7 @@ export function RAGSearchPage() {
       })
       setResults(response.results)
       setExpandedIndex(response.results.length > 0 ? 0 : null)
-    } catch (err) {
+    } catch {
       setResults([])
     } finally {
       setLoading(false)
@@ -67,9 +74,10 @@ export function RAGSearchPage() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">🔍 RAG Search</h1>
-        <p className="mt-1 text-gray-600">
-          Search your knowledge base directly
-        </p>
+        <div className="flex items-center gap-2 mt-1 text-gray-600">
+          <FolderOpen size={16} />
+          <span>{workflowId || 'No workflow selected'}</span>
+        </div>
       </div>
       
       {/* Stats */}
@@ -109,7 +117,7 @@ export function RAGSearchPage() {
                 >
                   {type}: {count as number}
                 </span>
-              )) || <div>No document types available</div>}
+              ))}
             </div>
           </div>
         </div>
@@ -133,11 +141,7 @@ export function RAGSearchPage() {
             disabled={loading || !query.trim()}
             className="btn-primary px-8 flex items-center gap-2"
           >
-            {loading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <Search size={20} />
-            )}
+            {loading ? <Loader2 size={20} className="animate-spin" /> : <Search size={20} />}
             Search
           </button>
         </div>
@@ -146,91 +150,70 @@ export function RAGSearchPage() {
       {/* Results */}
       {results.length > 0 && (
         <div className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-gray-900">
-              Results ({results.length})
-            </h2>
-            <button
-              onClick={() => setExpandedIndex(null)}
-              className="text-sm text-primary-600 hover:underline"
-            >
-              Collapse all
-            </button>
-          </div>
+          <h3 className="text-lg font-medium text-gray-900">
+            Found {results.length} results
+          </h3>
           
-          {results.map((result, idx) => {
-            const isExpanded = expandedIndex === idx
-            const relevancePercent = Math.round(result.relevance_score * 100)
-            
-            return (
-              <div key={idx} className="card overflow-hidden">
-                <button
-                  onClick={() => setExpandedIndex(isExpanded ? null : idx)}
-                  className="w-full p-4 flex items-center gap-4 text-left hover:bg-gray-50 transition-colors"
-                >
-                  <div
-                    className={clsx(
-                      'px-2 py-1 rounded-lg text-sm font-medium flex items-center gap-1',
+          {results.map((result, idx) => (
+            <div
+              key={idx}
+              className={clsx(
+                'card overflow-hidden transition-all',
+                expandedIndex === idx ? 'ring-2 ring-primary-200' : ''
+              )}
+            >
+              <button
+                onClick={() => setExpandedIndex(expandedIndex === idx ? null : idx)}
+                className="w-full p-4 text-left flex items-start gap-4"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={clsx(
+                      'px-2 py-0.5 rounded text-xs font-medium',
                       getRelevanceColor(result.relevance_score)
-                    )}
-                  >
-                    <Percent size={14} />
-                    {relevancePercent}%
+                    )}>
+                      {(result.relevance_score * 100).toFixed(0)}% match
+                    </span>
+                    <span className="text-xs text-gray-500">
+                      {result.metadata?.doc_type || 'unknown'}
+                    </span>
                   </div>
                   
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-gray-900 truncate">
-                      {(result.metadata as any)?.title || 'Untitled'}
-                    </p>
-                    <p className="text-sm text-gray-500 truncate">
-                      {result.content.slice(0, 100)}...
-                    </p>
-                  </div>
-                  
-                  {isExpanded ? (
-                    <ChevronUp size={20} className="text-gray-400" />
-                  ) : (
-                    <ChevronDown size={20} className="text-gray-400" />
-                  )}
-                </button>
+                  <p className={clsx(
+                    'text-gray-700',
+                    expandedIndex !== idx && 'line-clamp-2'
+                  )}>
+                    {result.content}
+                  </p>
+                </div>
                 
-                {isExpanded && (
-                  <div className="px-4 pb-4 border-t border-gray-100">
-                    <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-                      <p className="text-gray-700 whitespace-pre-wrap text-sm">
-                        {result.content}
-                      </p>
-                    </div>
-                    
-                    {result.metadata && Object.keys(result.metadata).length > 0 && (
-                      <div className="mt-4">
-                        <p className="text-sm font-medium text-gray-700 mb-2">
-                          Metadata
-                        </p>
-                        <div className="flex flex-wrap gap-2">
-                          {Object.entries(result.metadata).map(([key, value]) => (
-                            <span
-                              key={key}
-                              className="text-xs px-2 py-1 bg-gray-100 rounded"
-                            >
-                              <span className="text-gray-500">{key}:</span>{' '}
-                              <span className="text-gray-700">
-                                {String(value).slice(0, 50)}
-                              </span>
-                            </span>
-                          ))}
-                        </div>
-                      </div>
+                <div className="text-gray-400">
+                  {expandedIndex === idx ? (
+                    <ChevronUp size={20} />
+                  ) : (
+                    <ChevronDown size={20} />
+                  )}
+                </div>
+              </button>
+              
+              {expandedIndex === idx && result.metadata && (
+                <div className="px-4 pb-4 pt-2 border-t border-gray-100">
+                  <div className="text-xs text-gray-500 space-y-1">
+                    {result.metadata.stage_name && (
+                      <p>Stage: {result.metadata.stage_name}</p>
+                    )}
+                    {result.metadata.timestamp && (
+                      <p>Created: {new Date(result.metadata.timestamp).toLocaleString()}</p>
                     )}
                   </div>
-                )}
-              </div>
-            )
-          })}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       )}
       
-      {/* Empty state */}
+      {/* No results */}
       {!loading && results.length === 0 && query && (
         <div className="card p-12 text-center">
           <Search className="w-12 h-12 mx-auto text-gray-300 mb-4" />
@@ -255,7 +238,7 @@ export function RAGSearchPage() {
       {/* Workflow context */}
       <div className="mt-6 p-4 bg-gray-50 rounded-lg text-sm text-gray-500 flex items-center justify-between">
         <span>
-          Searching workflow: <code className="px-1 bg-gray-200 rounded">{workflowId}</code>
+          Searching workflow: <code className="px-1 bg-gray-200 rounded">{workflowId || 'None'}</code>
         </span>
         <button
           onClick={fetchStats}

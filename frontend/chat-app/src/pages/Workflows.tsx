@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, selectCurrentWorkflowId } from '../stores/chatStore'
 import { workflowApi } from '../lib/api'
 import type { Workflow } from '../types/api'
 import {
@@ -13,7 +13,13 @@ import {
 import clsx from 'clsx'
 
 export function WorkflowsPage() {
-  const { workflowId, setWorkflowId, clearMessages } = useChatStore()
+  // Get current workflowId using selector
+  const workflowId = useChatStore(selectCurrentWorkflowId)
+  
+  // Get actions
+  const setWorkflowId = useChatStore((state) => state.setWorkflowId)
+  const clearAllMessages = useChatStore((state) => state.clearAllMessages)
+  
   const [workflows, setWorkflows] = useState<Workflow[]>([])
   const [loading, setLoading] = useState(true)
   const [search, setSearch] = useState('')
@@ -41,7 +47,7 @@ export function WorkflowsPage() {
   const handleLoadWorkflow = (id: string) => {
     console.log('Loading workflow:', id)
     setWorkflowId(id)
-    clearMessages()
+    clearAllMessages()
   }
   
   const totalStages = workflows.reduce((sum, w) => sum + w.stage_count, 0)
@@ -96,18 +102,14 @@ export function WorkflowsPage() {
       </div>
       
       {/* Workflows list */}
-      <div className="card divide-y divide-gray-100">
+      <div className="space-y-3">
         {loading ? (
-          <div className="p-12 text-center">
-            <RefreshCw className="w-8 h-8 mx-auto text-primary-500 animate-spin mb-4" />
-            <p className="text-gray-600">Loading workflows...</p>
+          <div className="text-center py-12 text-gray-500">
+            Loading workflows...
           </div>
         ) : filteredWorkflows.length === 0 ? (
-          <div className="p-12 text-center">
-            <FolderOpen className="w-12 h-12 mx-auto text-gray-300 mb-4" />
-            <p className="text-gray-600">
-              {search ? 'No workflows match your search' : 'No workflows found'}
-            </p>
+          <div className="text-center py-12 text-gray-500">
+            {search ? 'No workflows match your search' : 'No workflows found'}
           </div>
         ) : (
           filteredWorkflows.map((workflow) => {
@@ -117,8 +119,10 @@ export function WorkflowsPage() {
               <div
                 key={workflow.workflow_id}
                 className={clsx(
-                  'p-4 hover:bg-gray-50 transition-colors',
-                  isCurrent && 'bg-primary-50'
+                  'bg-white rounded-xl border p-4 transition-all',
+                  isCurrent
+                    ? 'border-primary-300 ring-2 ring-primary-100'
+                    : 'border-gray-200 hover:border-gray-300'
                 )}
               >
                 <div className="flex items-center gap-4">
@@ -175,7 +179,7 @@ export function WorkflowsPage() {
       
       {/* Current workflow */}
       <div className="mt-6 p-4 bg-gray-50 rounded-lg text-sm text-gray-500">
-        Current workflow: <code className="px-1 bg-gray-200 rounded">{workflowId}</code>
+        Current workflow: <code className="px-1 bg-gray-200 rounded">{workflowId || 'None'}</code>
       </div>
     </div>
   )

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, selectCurrentWorkflowId, selectMessages } from '../stores/chatStore'
 import { healthApi, chatApi } from '../lib/api'
 import type { HealthResponse, RAGStats } from '../types/api'
 import {
@@ -15,17 +15,26 @@ import {
 } from 'lucide-react'
 
 export function DashboardPage() {
-  const { workflowId, messages } = useChatStore()
+  // Use selectors
+  const workflowId = useChatStore(selectCurrentWorkflowId)
+  const messages = useChatStore(selectMessages('workflow-chat'))
+  const initSession = useChatStore((state) => state.initSession)
+  
   const [health, setHealth] = useState<HealthResponse | null>(null)
   const [ragStats, setRagStats] = useState<RAGStats | null>(null)
   const [loading, setLoading] = useState(true)
+  
+  // Init session on mount
+  useEffect(() => {
+    initSession('workflow-chat')
+  }, [initSession])
   
   const fetchData = async () => {
     setLoading(true)
     try {
       const [healthData, statsData] = await Promise.all([
         healthApi.check().catch(() => null),
-        chatApi.getRAGStats(workflowId).catch(() => null),
+        workflowId ? chatApi.getRAGStats(workflowId).catch(() => null) : null,
       ])
       setHealth(healthData)
       setRagStats(statsData)
@@ -43,15 +52,16 @@ export function DashboardPage() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold gradient-text">🤖 Data Science Agent</h1>
-        <p className="mt-2 text-gray-600">
-          AI-powered analysis with intelligent context retrieval
-        </p>
+        <div className="flex items-center gap-2 mt-2 text-gray-600">
+          <FolderOpen size={18} />
+          <span>Current workflow: <strong>{workflowId || 'None'}</strong></span>
+        </div>
       </div>
       
       {/* Metrics */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div className="metric-card">
-          <div className="text-4xl font-bold mb-2">{messages.length}</div>
+          <div className="text-4xl font-bold mb-2">{messages?.length ?? 0}</div>
           <div className="text-sm opacity-90">Chat Messages</div>
         </div>
         
@@ -88,49 +98,45 @@ export function DashboardPage() {
           </button>
         </div>
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <Link
-            to="/chat"
-            className="card p-6 hover:border-primary-300 hover:shadow-md transition-all group"
-          >
-            <div className="w-12 h-12 rounded-xl gradient-bg flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+          <Link to="/chat" className="card p-6 hover:shadow-lg transition-shadow group">
+            <div className="w-12 h-12 gradient-bg rounded-xl flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
               <MessageSquare size={24} />
             </div>
-            <h3 className="font-semibold text-gray-900">Start Chat</h3>
-            <p className="text-sm text-gray-500 mt-1">Run data analysis workflows</p>
+            <h3 className="font-semibold text-gray-900">Workflow Chat</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Run data analysis workflows
+            </p>
           </Link>
           
-          <Link
-            to="/agent"
-            className="card p-6 hover:border-primary-300 hover:shadow-md transition-all group"
-          >
-            <div className="w-12 h-12 rounded-xl gradient-bg flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
+          <Link to="/agent" className="card p-6 hover:shadow-lg transition-shadow group">
+            <div className="w-12 h-12 gradient-bg rounded-xl flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
               <Bot size={24} />
             </div>
             <h3 className="font-semibold text-gray-900">RAG Agent</h3>
-            <p className="text-sm text-gray-500 mt-1">Chat with knowledge retrieval</p>
+            <p className="text-sm text-gray-500 mt-1">
+              Chat with knowledge retrieval
+            </p>
           </Link>
           
-          <Link
-            to="/documents"
-            className="card p-6 hover:border-primary-300 hover:shadow-md transition-all group"
-          >
-            <div className="w-12 h-12 rounded-xl gradient-bg flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
+          <Link to="/documents" className="card p-6 hover:shadow-lg transition-shadow group">
+            <div className="w-12 h-12 gradient-bg rounded-xl flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
               <FileText size={24} />
             </div>
-            <h3 className="font-semibold text-gray-900">Upload Documents</h3>
-            <p className="text-sm text-gray-500 mt-1">Add PDFs, text, or URLs</p>
+            <h3 className="font-semibold text-gray-900">Documents</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Upload and manage documents
+            </p>
           </Link>
           
-          <Link
-            to="/workflows"
-            className="card p-6 hover:border-primary-300 hover:shadow-md transition-all group"
-          >
-            <div className="w-12 h-12 rounded-xl gradient-bg flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
+          <Link to="/workflows" className="card p-6 hover:shadow-lg transition-shadow group">
+            <div className="w-12 h-12 gradient-bg rounded-xl flex items-center justify-center text-white mb-4 group-hover:scale-110 transition-transform">
               <FolderOpen size={24} />
             </div>
-            <h3 className="font-semibold text-gray-900">Browse Workflows</h3>
-            <p className="text-sm text-gray-500 mt-1">View past analyses</p>
+            <h3 className="font-semibold text-gray-900">Workflows</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              Browse past analyses
+            </p>
           </Link>
         </div>
       </div>
@@ -139,47 +145,46 @@ export function DashboardPage() {
       <div className="card p-6">
         <h2 className="text-xl font-semibold text-gray-900 mb-4">⚙️ System Status</h2>
         
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.ollama_connected ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-              <Cpu size={20} />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <Cpu size={16} className="text-gray-400" />
+              <span className="text-sm font-medium text-gray-600">Ollama</span>
             </div>
-            <div>
-              <p className="font-medium text-gray-900">Ollama</p>
-              <p className="text-sm text-gray-500">
-                {health?.ollama_connected ? 'Connected' : 'Disconnected'}
-              </p>
-            </div>
+            <span className={`text-sm ${health?.ollama_available ? 'text-green-600' : 'text-red-600'}`}>
+              {health?.ollama_available ? '● Online' : '○ Offline'}
+            </span>
           </div>
           
-          <div className="flex items-center gap-4">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${health?.rag_available ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'}`}>
-              <Database size={20} />
+          <div className="p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <Database size={16} className="text-gray-400" />
+              <span className="text-sm font-medium text-gray-600">RAG DB</span>
             </div>
-            <div>
-              <p className="font-medium text-gray-900">RAG System</p>
-              <p className="text-sm text-gray-500">
-                {health?.rag_available ? 'Active' : 'Inactive'}
-              </p>
-            </div>
+            <span className={`text-sm ${ragStats ? 'text-green-600' : 'text-yellow-600'}`}>
+              {ragStats ? '● Ready' : '○ Empty'}
+            </span>
           </div>
           
-          <div className="flex items-center gap-4">
-            <div className="w-10 h-10 rounded-lg bg-primary-100 text-primary-600 flex items-center justify-center">
-              <Activity size={20} />
+          <div className="p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <Activity size={16} className="text-gray-400" />
+              <span className="text-sm font-medium text-gray-600">Default Model</span>
             </div>
-            <div>
-              <p className="font-medium text-gray-900">API Version</p>
-              <p className="text-sm text-gray-500">{health?.version || 'Unknown'}</p>
-            </div>
+            <span className="text-sm text-gray-600">
+              {health?.default_model || 'Unknown'}
+            </span>
           </div>
-        </div>
-        
-        {/* Current Workflow */}
-        <div className="mt-6 pt-6 border-t border-gray-100">
-          <p className="text-sm text-gray-500">
-            Current Workflow: <code className="px-2 py-1 bg-gray-100 rounded text-gray-700">{workflowId}</code>
-          </p>
+          
+          <div className="p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center gap-2 mb-2">
+              <FolderOpen size={16} className="text-gray-400" />
+              <span className="text-sm font-medium text-gray-600">Workflow</span>
+            </div>
+            <span className="text-sm text-gray-600 truncate block">
+              {workflowId || 'None'}
+            </span>
+          </div>
         </div>
       </div>
     </div>

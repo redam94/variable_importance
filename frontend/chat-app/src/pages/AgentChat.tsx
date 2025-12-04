@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from 'react'
-import { useChatStore } from '../stores/chatStore'
+import { useChatStore, selectMessages, selectCurrentWorkflowId } from '../stores/chatStore'
 import { chatApi } from '../lib/api'
 import { ChatMessage } from '../components/chat/ChatMessage'
 import { ChatInput } from '../components/chat/ChatInput'
@@ -11,8 +11,12 @@ import {
   Sparkles,
   ChevronDown,
   ChevronUp,
+  FolderOpen,
 } from 'lucide-react'
 import clsx from 'clsx'
+import type { ChatMessage as ChatMessageType } from '../types/ws'
+
+const PAGE_TYPE = 'agent-chat'
 
 interface ToolEvent {
   type: 'tool_start' | 'tool_end'
@@ -22,24 +26,36 @@ interface ToolEvent {
 }
 
 export function AgentChatPage() {
-  const {
-    workflowId,
-    messages,
-    isStreaming,
-    streamingContent,
-    error,
-    addMessage,
-    appendToStream,
-    startStreaming,
-    stopStreaming,
-    clearMessages,
-    setError,
-  } = useChatStore()
+  // Get messages from agent-chat session
+  const messages = useChatStore(selectMessages(PAGE_TYPE))
+  
+  // Get SHARED workflowId from workflow-chat (consistent across all pages)
+  const workflowId = useChatStore(selectCurrentWorkflowId)
+  
+  // Get actions
+  const initSession = useChatStore((state) => state.initSession)
+  const addMessage = useChatStore((state) => state.addMessage)
+  const clearMessages = useChatStore((state) => state.clearMessages)
+  
+  // Local state for streaming (not persisted)
+  const [isStreaming, setIsStreaming] = useState(false)
+  const [streamingContent, setStreamingContent] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [toolEvents, setToolEvents] = useState<ToolEvent[]>([])
+  const [showTools, setShowTools] = useState(false)
   
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
-  const [toolEvents, setToolEvents] = useState<ToolEvent[]>([])
-  const [showTools, setShowTools] = useState(false)
+  const streamingContentRef = useRef('')
+  const doneProcessedRef = useRef(false)  // Guard against duplicate 'done' events
+  
+  // Initialize sessions on mount
+  useEffect(() => {
+    // Init workflow-chat to ensure shared workflowId exists
+    initSession('workflow-chat')
+    // Init agent-chat for this page's messages
+    initSession(PAGE_TYPE)
+  }, [initSession])
   
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -48,22 +64,43 @@ export function AgentChatPage() {
   
   const handleSend = useCallback(
     async (message: string) => {
-      // Add user message
-      addMessage({ role: 'user', content: message })
-      startStreaming()
+      // Add user message to store
+      const userMsg: ChatMessageType = {
+        id: `msg_${Date.now()}`,
+        type: 'user',
+        role: 'user',
+        content: message,
+        timestamp: new Date().toISOString(),
+      }
+      addMessage(PAGE_TYPE, userMsg)
+      
+      setIsStreaming(true)
+      setStreamingContent('')
+      streamingContentRef.current = ''
+      doneProcessedRef.current = false  // Reset guard for new request
       setError(null)
       setToolEvents([])
+      
+      // Convert messages to history format for API (handle undefined during hydration)
+      const history = (messages || []).map((m) => ({
+        role: m.role || (m.type === 'user' ? 'user' : 'assistant'),
+        content: m.content || '',
+      }))
       
       // Stream response using agent endpoint
       abortControllerRef.current = chatApi.streamAgentChat(
         {
           workflow_id: workflowId,
           message,
-          history: messages,
+          history,
         },
         (chunk) => {
           if (chunk.type === 'token') {
-            appendToStream(chunk.content)
+            setStreamingContent((prev) => {
+              const newContent = prev + chunk.content
+              streamingContentRef.current = newContent
+              return newContent
+            })
           } else if (chunk.type === 'tool_start') {
             setToolEvents((prev) => [
               ...prev,
@@ -72,7 +109,6 @@ export function AgentChatPage() {
           } else if (chunk.type === 'tool_end') {
             setToolEvents((prev) => {
               const events = [...prev]
-              // Find last tool_start from the end
               let lastStart = -1
               for (let i = events.length - 1; i >= 0; i--) {
                 if (events[i].type === 'tool_start') {
@@ -90,25 +126,55 @@ export function AgentChatPage() {
               return events
             })
           } else if (chunk.type === 'done') {
-            stopStreaming()
+            // Guard against duplicate done events
+            if (doneProcessedRef.current) {
+              console.log('[AgentChat] Ignoring duplicate done event')
+              return
+            }
+            doneProcessedRef.current = true
+            
+            // Add assistant message to store - use ref to avoid closure issues
+            const content = streamingContentRef.current
+            if (content) {
+              const assistantMsg: ChatMessageType = {
+                id: `msg_${Date.now()}`,
+                type: 'assistant',
+                role: 'assistant',
+                content,
+                timestamp: new Date().toISOString(),
+              }
+              addMessage(PAGE_TYPE, assistantMsg)
+            }
+            setStreamingContent('')
+            streamingContentRef.current = ''
+            setIsStreaming(false)
           } else if (chunk.type === 'error') {
             setError(chunk.content)
-            stopStreaming()
+            setIsStreaming(false)
           }
         },
         (error) => {
           setError(error.message)
-          stopStreaming()
+          setIsStreaming(false)
         }
       )
     },
-    [workflowId, messages, addMessage, startStreaming, appendToStream, stopStreaming, setError]
+    [workflowId, messages, addMessage]
   )
   
   const handleStop = useCallback(() => {
     abortControllerRef.current?.abort()
-    stopStreaming()
-  }, [stopStreaming])
+    setIsStreaming(false)
+  }, [])
+  
+  const handleClear = useCallback(() => {
+    clearMessages(PAGE_TYPE)
+    setStreamingContent('')
+    streamingContentRef.current = ''
+    doneProcessedRef.current = false
+    setError(null)
+    setToolEvents([])
+  }, [clearMessages])
   
   return (
     <div className="flex flex-col h-screen">
@@ -120,9 +186,10 @@ export function AgentChatPage() {
           </div>
           <div>
             <h1 className="text-xl font-semibold text-gray-900">RAG Agent</h1>
-            <p className="text-sm text-gray-500">
-              AI with knowledge retrieval and storage tools
-            </p>
+            <div className="flex items-center gap-2 text-sm text-gray-500">
+              <FolderOpen size={14} />
+              <span>{workflowId || 'No workflow selected'}</span>
+            </div>
           </div>
         </div>
         
@@ -146,7 +213,7 @@ export function AgentChatPage() {
           
           {/* Clear */}
           <button
-            onClick={clearMessages}
+            onClick={handleClear}
             className="btn-ghost text-red-500 hover:bg-red-50"
             title="Clear messages"
           >
@@ -205,7 +272,7 @@ export function AgentChatPage() {
       
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
-        {messages.length === 0 && !isStreaming ? (
+        {(!messages || messages.length === 0) && !isStreaming ? (
           <div className="flex flex-col items-center justify-center h-full text-center px-4">
             <div className="w-20 h-20 gradient-bg rounded-2xl flex items-center justify-center text-white mb-6">
               <Sparkles size={40} />
@@ -261,8 +328,12 @@ export function AgentChatPage() {
           </div>
         ) : (
           <div className="max-w-4xl mx-auto">
-            {messages.map((msg, idx) => (
-              <ChatMessage key={idx} role={msg.role} content={msg.content} />
+            {(messages || []).map((msg, idx) => (
+              <ChatMessage 
+                key={msg.id || idx} 
+                role={msg.role || 'assistant'} 
+                content={msg.content || ''} 
+              />
             ))}
             
             {isStreaming && (

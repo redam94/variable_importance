@@ -1,7 +1,7 @@
-import { useState, useCallback, useRef } from 'react'
-import { useChatStore } from '../stores/chatStore.ts'
-import { documentsApi } from '../lib/api.ts'
-import type { Document as DocType } from '../types/api.ts'
+import { useState, useCallback, useRef, useEffect } from 'react'
+import { useChatStore, selectCurrentWorkflowId } from '../stores/chatStore'
+import { documentsApi } from '../lib/api'
+import type { Document as DocType } from '../types/api'
 import {
   Upload,
   Link,
@@ -12,14 +12,16 @@ import {
   AlertCircle,
   Globe,
   RefreshCw,
+  FolderOpen,
 } from 'lucide-react'
 import clsx from 'clsx'
-import { useEffect } from 'react'
 
 type TabType = 'upload' | 'url' | 'manage'
 
 export function DocumentsPage() {
-  const { workflowId } = useChatStore()
+  const workflowId = useChatStore(selectCurrentWorkflowId)
+  const initSession = useChatStore((state) => state.initSession)
+  
   const [activeTab, setActiveTab] = useState<TabType>('upload')
   const [documents, setDocuments] = useState<DocType[]>([])
   const [loading, setLoading] = useState(false)
@@ -35,12 +37,17 @@ export function DocumentsPage() {
   const [url, setUrl] = useState('')
   const [urlTitle, setUrlTitle] = useState('')
   
+  // Init session on mount
+  useEffect(() => {
+    initSession('workflow-chat')
+  }, [initSession])
+  
   const fetchDocuments = useCallback(async () => {
+    if (!workflowId) return
     try {
       const docs = await documentsApi.list(workflowId)
       setDocuments(docs)
     } catch {
-      // Documents may not exist yet
       setDocuments([])
     }
   }, [workflowId])
@@ -50,6 +57,7 @@ export function DocumentsPage() {
   }, [fetchDocuments])
   
   const handleFileUpload = async (files: FileList) => {
+    if (!workflowId) return
     setError(null)
     setSuccess(null)
     
@@ -78,7 +86,7 @@ export function DocumentsPage() {
   
   const handleUrlScrape = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!url.trim()) return
+    if (!url.trim() || !workflowId) return
     
     setLoading(true)
     setError(null)
@@ -96,18 +104,18 @@ export function DocumentsPage() {
       setUrlTitle('')
       await fetchDocuments()
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Scraping failed')
+      setError(err instanceof Error ? err.message : 'Scrape failed')
     } finally {
       setLoading(false)
     }
   }
   
-  const handleDelete = async (title: string) => {
-    if (!confirm(`Delete "${title}"?`)) return
+  const handleDelete = async (docId: string) => {
+    if (!workflowId || !confirm('Delete this document?')) return
     
     try {
-      await documentsApi.delete(workflowId, title)
-      setSuccess(`Deleted "${title}"`)
+      await documentsApi.delete(docId, workflowId)
+      setSuccess('Document deleted')
       await fetchDocuments()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Delete failed')
@@ -117,26 +125,8 @@ export function DocumentsPage() {
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
     setIsDragging(false)
-    
     if (e.dataTransfer.files.length > 0) {
       handleFileUpload(e.dataTransfer.files)
-    }
-  }
-  
-  const getFileIcon = (sourceType: string) => {
-    switch (sourceType) {
-      case 'pdf':
-        return '📕'
-      case 'url':
-        return '🌐'
-      case 'md':
-        return '📝'
-      case 'csv':
-        return '📊'
-      case 'json':
-        return '📋'
-      default:
-        return '📄'
     }
   }
   
@@ -144,146 +134,116 @@ export function DocumentsPage() {
     <div className="p-8 max-w-4xl mx-auto">
       {/* Header */}
       <div className="mb-8">
-        <h1 className="text-2xl font-bold text-gray-900">📚 Documents</h1>
-        <p className="mt-1 text-gray-600">
-          Upload files or scrape URLs to build your knowledge base
-        </p>
-      </div>
-      
-      {/* Tabs */}
-      <div className="flex gap-2 mb-6">
-        {[
-          { id: 'upload', label: 'Upload Files', icon: Upload },
-          { id: 'url', label: 'Scrape URL', icon: Globe },
-          { id: 'manage', label: 'Manage', icon: FileText },
-        ].map((tab) => (
-          <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as TabType)}
-            className={clsx(
-              'flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors',
-              activeTab === tab.id
-                ? 'gradient-bg text-white'
-                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-            )}
-          >
-            <tab.icon size={18} />
-            {tab.label}
-          </button>
-        ))}
+        <h1 className="text-2xl font-bold text-gray-900">📄 Documents</h1>
+        <div className="flex items-center gap-2 mt-1 text-gray-600">
+          <FolderOpen size={16} />
+          <span>{workflowId || 'No workflow selected'}</span>
+        </div>
       </div>
       
       {/* Alerts */}
       {error && (
-        <div className="mb-6 flex items-center gap-3 p-4 bg-red-50 text-red-700 rounded-lg">
+        <div className="mb-6 p-4 bg-red-50 border border-red-200 rounded-lg flex items-center gap-3 text-red-700">
           <AlertCircle size={20} />
-          <p>{error}</p>
-          <button
-            onClick={() => setError(null)}
-            className="ml-auto text-red-500 hover:text-red-700"
-          >
-            ×
-          </button>
+          {error}
         </div>
       )}
       
       {success && (
-        <div className="mb-6 flex items-center gap-3 p-4 bg-green-50 text-green-700 rounded-lg">
+        <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg flex items-center gap-3 text-green-700">
           <CheckCircle size={20} />
-          <p>{success}</p>
-          <button
-            onClick={() => setSuccess(null)}
-            className="ml-auto text-green-500 hover:text-green-700"
-          >
-            ×
-          </button>
+          {success}
         </div>
       )}
       
-      {/* Upload Tab */}
-      {activeTab === 'upload' && (
-        <div className="card p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            📤 Upload Documents
-          </h2>
-          <p className="text-sm text-gray-600 mb-6">
-            Supported formats: PDF, TXT, MD, CSV, JSON
-          </p>
-          
-          {/* Drop zone */}
-          <div
-            onDragOver={(e) => {
-              e.preventDefault()
-              setIsDragging(true)
-            }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
+      {/* Tabs */}
+      <div className="flex gap-2 mb-6">
+        {[
+          { id: 'upload' as TabType, label: 'Upload Files', icon: Upload },
+          { id: 'url' as TabType, label: 'Add URL', icon: Globe },
+          { id: 'manage' as TabType, label: 'Manage', icon: FileText },
+        ].map(({ id, label, icon: Icon }) => (
+          <button
+            key={id}
+            onClick={() => setActiveTab(id)}
             className={clsx(
-              'border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors',
-              isDragging
-                ? 'border-primary-500 bg-primary-50'
-                : 'border-gray-300 hover:border-primary-400 hover:bg-gray-50'
+              'flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors',
+              activeTab === id
+                ? 'bg-primary-100 text-primary-700'
+                : 'text-gray-600 hover:bg-gray-100'
             )}
           >
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              accept=".pdf,.txt,.md,.csv,.json"
-              onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
-              className="hidden"
-            />
-            
+            <Icon size={18} />
+            {label}
+          </button>
+        ))}
+      </div>
+      
+      {/* Upload Tab */}
+      {activeTab === 'upload' && (
+        <div
+          onDragOver={(e) => { e.preventDefault(); setIsDragging(true) }}
+          onDragLeave={() => setIsDragging(false)}
+          onDrop={handleDrop}
+          className={clsx(
+            'card p-12 border-2 border-dashed text-center transition-all',
+            isDragging ? 'border-primary-400 bg-primary-50' : 'border-gray-300',
+            loading && 'opacity-50 pointer-events-none'
+          )}
+        >
+          <Upload className="w-12 h-12 mx-auto text-gray-400 mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 mb-2">
+            Drop files here or click to upload
+          </h3>
+          <p className="text-gray-500 mb-4">
+            Supports PDF, TXT, MD, CSV, JSON files
+          </p>
+          
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept=".pdf,.txt,.md,.csv,.json"
+            onChange={(e) => e.target.files && handleFileUpload(e.target.files)}
+            className="hidden"
+          />
+          
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            className="btn-primary"
+          >
             {loading ? (
-              <div>
-                <Loader2 className="w-12 h-12 mx-auto text-primary-500 animate-spin mb-4" />
-                <p className="text-gray-600">Uploading... {Math.round(uploadProgress)}%</p>
-                <div className="mt-4 w-48 mx-auto bg-gray-200 rounded-full h-2">
-                  <div
-                    className="gradient-bg h-2 rounded-full transition-all"
-                    style={{ width: `${uploadProgress}%` }}
-                  />
-                </div>
-              </div>
-            ) : (
               <>
-                <Upload className="w-12 h-12 mx-auto text-gray-400 mb-4" />
-                <p className="text-gray-700 font-medium">
-                  Drop files here or click to browse
-                </p>
-                <p className="text-sm text-gray-500 mt-2">
-                  Maximum file size: 10MB
-                </p>
+                <Loader2 size={18} className="animate-spin mr-2" />
+                Uploading {uploadProgress}%
               </>
+            ) : (
+              'Select Files'
             )}
-          </div>
+          </button>
         </div>
       )}
       
       {/* URL Tab */}
       {activeTab === 'url' && (
-        <div className="card p-6">
-          <h2 className="text-lg font-semibold text-gray-900 mb-4">
-            🌐 Scrape URL
-          </h2>
-          <p className="text-sm text-gray-600 mb-6">
-            Extract content from web pages and add to your knowledge base
-          </p>
-          
-          <form onSubmit={handleUrlScrape} className="space-y-4">
+        <form onSubmit={handleUrlScrape} className="card p-6">
+          <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1">
-                URL
+                URL to scrape
               </label>
-              <input
-                type="url"
-                value={url}
-                onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/documentation"
-                className="input-field"
-                required
-              />
+              <div className="relative">
+                <Link className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+                <input
+                  type="url"
+                  value={url}
+                  onChange={(e) => setUrl(e.target.value)}
+                  placeholder="https://example.com/article"
+                  className="input-field pl-10"
+                  required
+                />
+              </div>
             </div>
             
             <div>
@@ -294,7 +254,7 @@ export function DocumentsPage() {
                 type="text"
                 value={urlTitle}
                 onChange={(e) => setUrlTitle(e.target.value)}
-                placeholder="Auto-detected from page"
+                placeholder="Custom title for this document"
                 className="input-field"
               />
             </div>
@@ -302,31 +262,31 @@ export function DocumentsPage() {
             <button
               type="submit"
               disabled={loading || !url.trim()}
-              className="btn-primary flex items-center gap-2"
+              className="btn-primary w-full"
             >
               {loading ? (
                 <>
-                  <Loader2 className="w-5 h-5 animate-spin" />
+                  <Loader2 size={18} className="animate-spin mr-2" />
                   Scraping...
                 </>
               ) : (
                 <>
-                  <Link size={18} />
+                  <Globe size={18} className="mr-2" />
                   Scrape URL
                 </>
               )}
             </button>
-          </form>
-        </div>
+          </div>
+        </form>
       )}
       
       {/* Manage Tab */}
       {activeTab === 'manage' && (
-        <div className="card p-6">
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="text-lg font-semibold text-gray-900">
-              📋 Documents ({documents.length})
-            </h2>
+        <div>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-medium text-gray-900">
+              {documents.length} Documents
+            </h3>
             <button
               onClick={fetchDocuments}
               className="btn-ghost flex items-center gap-2"
@@ -337,42 +297,35 @@ export function DocumentsPage() {
           </div>
           
           {documents.length === 0 ? (
-            <div className="text-center py-12 text-gray-500">
-              <FileText className="w-12 h-12 mx-auto mb-4 opacity-50" />
-              <p>No documents yet. Upload files or scrape URLs to get started.</p>
+            <div className="card p-12 text-center">
+              <FileText className="w-12 h-12 mx-auto text-gray-300 mb-4" />
+              <p className="text-gray-600">No documents yet</p>
+              <p className="text-sm text-gray-500 mt-2">
+                Upload files or scrape URLs to get started
+              </p>
             </div>
           ) : (
             <div className="space-y-3">
               {documents.map((doc) => (
                 <div
                   key={doc.title}
-                  className="flex items-center gap-4 p-4 bg-gray-50 rounded-lg hover:bg-gray-100 transition-colors"
+                  className="card p-4 flex items-center justify-between"
                 >
-                  <span className="text-2xl">{getFileIcon(doc.source_type)}</span>
-                  
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-gray-900 truncate">
-                      {doc.title}
-                    </p>
-                    <p className="text-sm text-gray-500">
-                      {doc.chunk_count} chunks • {doc.content_length.toLocaleString()} chars
-                      {doc.url && (
-                        <a
-                          href={doc.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="ml-2 text-primary-600 hover:underline"
-                        >
-                          🔗 Source
-                        </a>
-                      )}
-                    </p>
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+                      <FileText size={20} className="text-gray-500" />
+                    </div>
+                    <div>
+                      <p className="font-medium text-gray-900">{doc.title}</p>
+                      <p className="text-sm text-gray-500">
+                        {doc.chunk_count} chunks • {doc.source_type}
+                      </p>
+                    </div>
                   </div>
                   
                   <button
                     onClick={() => handleDelete(doc.title)}
-                    className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                    title="Delete"
+                    className="btn-ghost text-red-500 hover:bg-red-50"
                   >
                     <Trash2 size={18} />
                   </button>
@@ -385,7 +338,7 @@ export function DocumentsPage() {
       
       {/* Workflow context */}
       <div className="mt-6 p-4 bg-gray-50 rounded-lg text-sm text-gray-500">
-        Documents are associated with workflow: <code className="px-1 bg-gray-200 rounded">{workflowId}</code>
+        Adding documents to: <code className="px-1 bg-gray-200 rounded">{workflowId || 'None'}</code>
       </div>
     </div>
   )

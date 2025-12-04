@@ -211,15 +211,15 @@ class RAGQueryRequest(BaseModel):
     query: str
     workflow_id: str
     n_results: int = Field(default=5, ge=1, le=20)
+    doc_types: Optional[List[str]] = Field(default=None, description="Filter by document types")
 
 
 class RAGChunk(BaseModel):
     """A RAG result chunk."""
 
     content: str
-    source: str
-    score: float
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    relevance_score: float = Field(default=0.0)
 
 
 class RAGQueryResponse(BaseModel):
@@ -227,7 +227,7 @@ class RAGQueryResponse(BaseModel):
 
     query: str
     results: List[RAGChunk]
-    total_chunks: int
+    total_found: int
 
 
 class RAGStats(BaseModel):

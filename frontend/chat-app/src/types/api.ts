@@ -166,19 +166,19 @@ export interface RAGQueryRequest {
   query: string
   workflow_id: string
   n_results?: number
+  doc_types?: string[]  // Optional filter by document types
 }
 
 export interface RAGChunk {
   content: string
-  source: string
-  score: number
   metadata: Record<string, unknown>
+  relevance_score: number  // Match backend field name
 }
 
 export interface RAGQueryResponse {
   query: string
   results: RAGChunk[]
-  total_chunks: number
+  total_found: number  // Match backend field name
 }
 
 export interface RAGStats {

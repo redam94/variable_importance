@@ -185,6 +185,7 @@ async def stream_agent_chat(request: ChatRequest):
                 """Retrieve relevant context from the knowledge base for the given query."""
                 if not rag or not rag.enabled:
                     return "RAG not available"
+                logger.info(f"Tool retrieve_context called with query: {query}")
                 return rag.get_context_summary(
                     query=query,
                     workflow_id=request.workflow_id,
@@ -196,6 +197,7 @@ async def stream_agent_chat(request: ChatRequest):
                 """Store useful information in the knowledge base for future reference."""
                 if not rag or not rag.enabled:
                     return "RAG not available"
+                logger.info(f"Tool store_knowledge called")
                 rag.add_summary(
                     summary=document,
                     stage_name="chat",
@@ -206,15 +208,32 @@ async def stream_agent_chat(request: ChatRequest):
 
             # Create agent
             try:
-                from langgraph.prebuilt import create_react_agent
-
-                agent = create_react_agent(
+                from langchain.agents import create_agent
+                from langchain.agents.middleware import TodoListMiddleware, SummarizationMiddleware
+                
+                agent = create_agent(
                     model=llm,
                     tools=[retrieve_context, store_knowledge],
+                    middleware=[TodoListMiddleware(), SummarizationMiddleware(model=llm, messages_to_keep=20)],
                 )
-
+                logger.info(f"Using LangGraph agent for chat streaming have {len(request.history or [])} history messages")
                 # Build messages
-                messages = []
+                messages = [
+                    SystemMessage(
+                        content=(
+                            "You are a helpful data science assistant that has access to tools for retrieving and storing knowledge. "
+                            "Create a plan for querying the knowledge base to answer the user's questions effectively. "
+                            "Use the tools to assist with the user's queries effectively. "
+                            "Be accurate, cite sources when available, and provide detailed explanations. "
+                            "Make sure to use the 'retrieve_context' tool to get relevant information from the knowledge base before answering. "
+                            "Even if the user does not explicitly ask for it. " 
+                            "Try calling the 'retrieve_context' tool multiple times before answering with different queries to gather relevant information. "
+                            "Assess the information you find from the 'retrieve_context' tool if you need to gather more context call the tool again. "
+                            "The information you find may also help you decide what to query next. "
+                            "Use the 'store_knowledge' tool to save information the user provides; this will help you in future interactions."
+                        )
+                    )
+                    ]
                 if request.history:
                     for msg in request.history:
                         if msg.role == "user":
@@ -239,9 +258,9 @@ async def stream_agent_chat(request: ChatRequest):
                         yield f"data: {json.dumps({'type': 'tool', 'content': f'Using {tool_name}...'})}\n\n"
 
                     # Handle model output
-                    elif metadata.get("langgraph_node") == "agent":
-                        if hasattr(message, "content") and message.content:
-                            yield f"data: {json.dumps({'type': 'token', 'content': message.content})}\n\n"
+                    elif metadata.get("langgraph_node") == "model":
+                        if hasattr(message, "content_blocks") and message.content_blocks and message.content_blocks[-1]['type'] == "text":
+                            yield f"data: {json.dumps({'type': 'token', 'content': message.content_blocks[-1]['text']})}\n\n"
 
                 yield f"data: {json.dumps({'type': 'done', 'content': ''})}\n\n"
 
@@ -318,7 +337,7 @@ async def query_rag(request: RAGQueryRequest) -> RAGQueryResponse:
         results = rag.query_relevant_context(
             query=request.query,
             workflow_id=workflow_id,
-            doc_types=request.doc_types,
+            doc_types=getattr(request, 'doc_types', None),
             n_results=request.n_results,
         )
 
