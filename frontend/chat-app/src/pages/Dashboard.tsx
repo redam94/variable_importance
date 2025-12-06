@@ -48,7 +48,7 @@ export function DashboardPage() {
   }, [workflowId])
   
   return (
-    <div className="p-8">
+    <div className="p-8 h-full min-h-screen overflow-auto">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold gradient-text">🤖 Data Science Agent</h1>
@@ -151,8 +151,8 @@ export function DashboardPage() {
               <Cpu size={16} className="text-gray-400" />
               <span className="text-sm font-medium text-gray-600">Ollama</span>
             </div>
-            <span className={`text-sm ${health?.ollama_available ? 'text-green-600' : 'text-red-600'}`}>
-              {health?.ollama_available ? '● Online' : '○ Offline'}
+            <span className={`text-sm ${health?.ollama_connected ? 'text-green-600' : 'text-red-600'}`}>
+              {health?.ollama_connected ? '● Online' : '○ Offline'}
             </span>
           </div>
           
@@ -172,7 +172,7 @@ export function DashboardPage() {
               <span className="text-sm font-medium text-gray-600">Default Model</span>
             </div>
             <span className="text-sm text-gray-600">
-              {health?.default_model || 'Unknown'}
+              {health?.default_model || "qwen3"}
             </span>
           </div>
           

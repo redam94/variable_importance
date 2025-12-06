@@ -3,9 +3,14 @@ import { User, Bot, Copy, Check } from 'lucide-react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useState } from 'react'
+
+// Import KaTeX CSS - add this to your index.html or import in main.tsx:
+// <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" />
 
 interface ChatMessageProps {
   role: 'user' | 'assistant'
@@ -61,7 +66,7 @@ const markdownComponents = {
       )
     }
 
-    // Inline code
+    // Inline code (but not math)
     return (
       <code
         className="px-1.5 py-0.5 bg-gray-100 text-gray-800 rounded text-sm font-mono"
@@ -141,7 +146,11 @@ export const ChatMessage = memo(function ChatMessage({
   const renderedContent = useMemo(() => {
     if (!content) return null
     return (
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown 
+        remarkPlugins={[remarkGfm, remarkMath]} 
+        rehypePlugins={[rehypeKatex]}
+        components={markdownComponents}
+      >
         {content}
       </ReactMarkdown>
     )
@@ -177,7 +186,7 @@ export const ChatMessage = memo(function ChatMessage({
           )}
         </div>
 
-        <div className="text-gray-700">
+        <div className="text-gray-700 prose prose-sm max-w-none">
           {renderedContent || (
             <span className="flex gap-1">
               <span className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
@@ -190,3 +199,5 @@ export const ChatMessage = memo(function ChatMessage({
     </div>
   )
 })
+
+export default ChatMessage

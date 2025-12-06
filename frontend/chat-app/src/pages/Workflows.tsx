@@ -54,7 +54,7 @@ export function WorkflowsPage() {
   const totalOutputs = workflows.reduce((sum, w) => sum + w.stage_count, 0)
   
   return (
-    <div className="p-8 max-w-4xl mx-auto">
+    <div className="p-8 max-w-4xl mx-auto overflow-scroll h-full min-h-screen sm:w-full">
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-gray-900">📚 Workflows</h1>

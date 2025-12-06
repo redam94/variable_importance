@@ -35,7 +35,7 @@ export function Layout() {
   }
   
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-full bg-gray-50">
       {/* Sidebar */}
       <aside
         className={clsx(
@@ -114,7 +114,7 @@ export function Layout() {
       {/* Main content */}
       <main
         className={clsx(
-          'flex-1 overflow-auto transition-all duration-300',
+          'flex-1 flex flex-col overflow-hidden transition-all duration-300',
           sidebarOpen ? 'ml-64' : 'ml-16'
         )}
       >
