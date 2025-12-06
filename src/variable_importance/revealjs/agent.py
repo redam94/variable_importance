@@ -19,7 +19,8 @@ from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
-from langgraph.prebuilt import create_react_agent
+from langchain.agents import create_agent
+from langchain.agents.middleware import TodoListMiddleware
 
 from .models import (
     PresentationOutline,
@@ -51,6 +52,7 @@ class RevealJSState(TypedDict):
     workflow_context: str
     revealjs_snippets: str
     style_context: str
+    plot_analyses: str  # Detailed plot descriptions from RAG
     available_images: List[Dict[str, str]]
     
     # Planning outputs
@@ -155,13 +157,12 @@ class RevealJSAgent:
         output_manager = self.output_manager
         
         @tool
-        def query_workflow_context(query: str, doc_types: str = "") -> str:
+        def query_workflow_context(query: str) -> str:
             """
             Query the workflow RAG for analysis results, summaries, and findings.
             
             Args:
                 query: Search query for relevant context
-                doc_types: Optional comma-separated doc types (summary, code_execution, plot_analysis, web_result)
             
             Returns:
                 Relevant context from the workflow
@@ -170,7 +171,7 @@ class RevealJSAgent:
                 return "No workflow context available."
             
             try:
-                type_list = [t.strip() for t in doc_types.split(",")] if doc_types else None
+                type_list = None #[t.strip() for t in doc_types.split(",")] if doc_types else None
                 
                 results = workflow_rag.query_relevant_context(
                     query=query,
@@ -242,15 +243,64 @@ class RevealJSAgent:
             return style_memory.get_formatted_context(query if query else None)
         
         @tool
+        def query_plot_analyses(query: str = "") -> str:
+            """
+            Query for plot/chart analyses from the RAG system.
+            
+            Returns detailed descriptions of what each visualization shows,
+            including insights, trends, and key findings from each plot.
+            
+            Args:
+                query: Optional search query to filter plots (e.g., "correlation", "distribution")
+            
+            Returns:
+                Detailed plot analyses with descriptions
+            """
+            if not workflow_rag or not workflow_rag.enabled:
+                return "No workflow RAG available."
+            
+            try:
+                search_query = query if query else "plot chart visualization figure analysis"
+                
+                results = workflow_rag.query_relevant_context(
+                    query=search_query,
+                    doc_types=["plot_analysis"],
+                    n_results=20,
+                )
+                
+                if not results:
+                    return "No plot analyses found in RAG."
+                
+                output_parts = ["## Plot Analyses from RAG\n"]
+                
+                for r in results:
+                    metadata = r.get("metadata", {})
+                    doc = r.get("document", "")
+                    
+                    plot_name = metadata.get("plot_name", "Unknown plot")
+                    stage = metadata.get("stage_name", "")
+                    
+                    output_parts.append(f"### {plot_name}")
+                    if stage:
+                        output_parts.append(f"Stage: {stage}")
+                    output_parts.append(doc)
+                    output_parts.append("")
+                
+                return "\n".join(output_parts)
+                
+            except Exception as e:
+                return f"Error querying plot analyses: {e}"
+        
+        @tool
         def list_available_images(stage_name: str) -> str:
             """
-            List available images/plots from a workflow stage.
+            List available images/plots from a workflow stage with their descriptions.
             
             Args:
                 stage_name: Name of the stage to search for images
             
             Returns:
-                List of available images with descriptions
+                List of available images with descriptions from plot analysis
             """
             if not output_manager:
                 return "No output manager available."
@@ -263,17 +313,64 @@ class RevealJSAgent:
                 if plots_dir.exists():
                     for ext in ["*.png", "*.jpg", "*.jpeg", "*.svg"]:
                         for img_file in plots_dir.glob(ext):
-                            images.append(f"- {img_file.name}: {img_file.stem.replace('_', ' ').title()}")
+                            images.append({
+                                "name": img_file.name,
+                                "path": str(img_file),
+                            })
                 
                 if not images:
                     return f"No images found in stage: {stage_name}"
                 
-                return f"Available images in {stage_name}:\n" + "\n".join(images)
+                # Try to get descriptions from RAG
+                plot_descriptions = {}
+                if workflow_rag and workflow_rag.enabled:
+                    try:
+                        results = workflow_rag.query_relevant_context(
+                            query="plot chart visualization figure analysis",
+                            doc_types=["plot_analysis"],
+                            n_results=30,
+                        )
+                        
+                        for r in results:
+                            metadata = r.get("metadata", {})
+                            doc = r.get("document", "")
+                            plot_name = metadata.get("plot_name", "")
+                            
+                            if plot_name:
+                                # Extract analysis
+                                if "Analysis:" in doc:
+                                    analysis = doc.split("Analysis:")[-1].strip()
+                                else:
+                                    analysis = doc
+                                
+                                # Truncate
+                                if len(analysis) > 300:
+                                    analysis = analysis[:300] + "..."
+                                
+                                plot_descriptions[plot_name] = analysis
+                                plot_descriptions[Path(plot_name).stem] = analysis
+                    except Exception as e:
+                        logger.warning(f"Could not get plot descriptions: {e}")
+                
+                # Build output with descriptions
+                output_lines = [f"Available images in {stage_name}:"]
+                for img in images:
+                    desc = plot_descriptions.get(
+                        img["name"],
+                        plot_descriptions.get(
+                            Path(img["name"]).stem,
+                            "No description available"
+                        )
+                    )
+                    output_lines.append(f"\n- {img['name']}:")
+                    output_lines.append(f"  {desc}")
+                
+                return "\n".join(output_lines)
                 
             except Exception as e:
                 return f"Error listing images: {e}"
         
-        return [query_workflow_context, query_revealjs_docs, get_style_preferences, list_available_images]
+        return [query_workflow_context, query_revealjs_docs, get_style_preferences, query_plot_analyses, list_available_images]
     
     # =========================================================================
     # WORKFLOW NODES
@@ -287,10 +384,7 @@ class RevealJSAgent:
         
         tools = self._create_rag_tools()
         
-        agent = create_react_agent(
-            model=self.llm,
-            tools=tools,
-        )
+        
         
         system_prompt = """You are a research assistant gathering context for a presentation.
 
@@ -298,13 +392,21 @@ Your goal is to thoroughly research the topic and gather ALL relevant informatio
 
 INSTRUCTIONS:
 1. Query the workflow context multiple times with different queries to get comprehensive coverage
-2. Search for: summaries, analysis results, key findings, data insights, conclusions
-3. Get RevealJS documentation for relevant layouts and features
-4. Check user style preferences
-5. List available images that could be used
+2. Search for: documents, summaries, analysis results, key findings, data insights, conclusions
+3. Query for plot analyses to understand what each visualization shows
+4. Get RevealJS documentation for relevant layouts and features
+5. Check user style preferences
+6. List available images with their descriptions
 
-Be thorough - make multiple queries to ensure you capture all important information."""
+Be thorough - make multiple queries to ensure you capture all important information.
+Plot analyses are especially important for matching visualizations to content."""
 
+        agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            middleware=[TodoListMiddleware()],
+            system_prompt=system_prompt
+        )
         user_message = f"""Research and gather all context for a presentation about: "{state['topic']}"
 
 Workflow ID: {state['workflow_id']}
@@ -315,12 +417,16 @@ Make multiple queries to the workflow context to gather:
 2. Key data points and statistics  
 3. Methodology and approach
 4. Conclusions and recommendations
-5. Any visualizations or plots
+5. Additional insights and context
+
+IMPORTANT - Query for plot analyses to understand visualizations:
+6. Use query_plot_analyses to get detailed descriptions of all charts/plots
+7. This will help match the right images to the right slides
 
 Also get:
 - Relevant RevealJS code snippets for layouts
 - User style preferences
-- List of available images
+- List of available images with their descriptions
 
 Be comprehensive - query multiple times with different search terms."""
 
@@ -337,11 +443,15 @@ Be comprehensive - query multiple times with different search terms."""
             # Collect all tool outputs
             workflow_context_parts = []
             revealjs_parts = []
+            plot_analysis_parts = []
             
             for msg in final_messages:
                 content = getattr(msg, "content", "")
                 if isinstance(content, str):
-                    if any(marker in content.lower() for marker in ["[summary", "[code_execution", "[plot_analysis", "---"]):
+                    # Categorize based on content
+                    if "## Plot Analyses" in content or "plot_analysis" in content.lower():
+                        plot_analysis_parts.append(content)
+                    elif any(marker in content.lower() for marker in ["[summary", "[code_execution", "[plot_analysis", "---"]):
                         workflow_context_parts.append(content)
                     elif "###" in content and any(kw in content.lower() for kw in ["slide", "reveal", "layout", "transition"]):
                         revealjs_parts.append(content)
@@ -356,17 +466,23 @@ Be comprehensive - query multiple times with different search terms."""
             state["workflow_context"] = "\n\n".join(workflow_context_parts) if workflow_context_parts else final_response
             state["revealjs_snippets"] = "\n\n".join(revealjs_parts)
             state["style_context"] = self.style_memory.get_formatted_context()
+            state["plot_analyses"] = "\n\n".join(plot_analysis_parts)
             state["messages"] = final_messages
             
-            self._emit(f"Gathered {len(workflow_context_parts)} context chunks")
+            self._emit(f"Gathered {len(workflow_context_parts)} context chunks, {len(plot_analysis_parts)} plot analyses")
             
         except Exception as e:
             logger.error(f"Context gathering failed: {e}")
             state["workflow_context"] = self._direct_workflow_query(state["topic"], state["workflow_id"])
             state["revealjs_snippets"] = self._direct_docs_query("presentation slides layouts")
             state["style_context"] = self.style_memory.get_formatted_context()
+            state["plot_analyses"] = self._direct_plot_analyses_query(state["workflow_id"])
         
-        state["available_images"] = self._get_available_images(state["stage_name"])
+        # Get available images with RAG descriptions
+        state["available_images"] = await self._get_images_with_descriptions(
+            stage_name=state["stage_name"],
+            workflow_id=state["workflow_id"],
+        )
         
         return state
     
@@ -397,8 +513,37 @@ Be comprehensive - query multiple times with different search terms."""
         results = self.docs_rag.query(query, n_results=5)
         return "\n\n".join(r.get("document", "") for r in results)
     
+    def _direct_plot_analyses_query(self, workflow_id: str) -> str:
+        """Fallback direct query for plot analyses."""
+        if not self.workflow_rag or not self.workflow_rag.enabled:
+            return ""
+        
+        try:
+            results = self.workflow_rag.query_relevant_context(
+                query="plot chart visualization figure analysis",
+                workflow_id=workflow_id,
+                doc_types=["plot_analysis"],
+                n_results=20,
+            )
+            
+            if not results:
+                return ""
+            
+            parts = ["## Plot Analyses\n"]
+            for r in results:
+                metadata = r.get("metadata", {})
+                doc = r.get("document", "")
+                plot_name = metadata.get("plot_name", "Unknown")
+                parts.append(f"### {plot_name}\n{doc}\n")
+            
+            return "\n".join(parts)
+            
+        except Exception as e:
+            logger.error(f"Plot analyses query failed: {e}")
+            return ""
+    
     def _get_available_images(self, stage_name: str) -> List[Dict[str, str]]:
-        """Get available images from workflow output."""
+        """Get available images from workflow output with RAG descriptions."""
         images = []
         
         if not self.output_manager:
@@ -420,6 +565,102 @@ Be comprehensive - query multiple times with different search terms."""
             logger.warning(f"Error getting images: {e}")
         
         return images
+    
+    async def _get_images_with_descriptions(
+        self, 
+        stage_name: str, 
+        workflow_id: str
+    ) -> List[Dict[str, str]]:
+        """
+        Get available images enriched with descriptions from RAG plot_analysis.
+        
+        Queries RAG for plot_analysis documents to get detailed descriptions
+        of what each plot shows.
+        """
+        # First get the file list
+        images = self._get_available_images(stage_name)
+        
+        if not images:
+            return images
+        
+        if not self.workflow_rag or not self.workflow_rag.enabled:
+            return images
+        
+        self._emit(f"Enriching {len(images)} images with RAG descriptions...")
+        
+        # Query RAG for plot analyses
+        try:
+            results = self.workflow_rag.query_relevant_context(
+                query="plot chart visualization analysis figure",
+                workflow_id=workflow_id,
+                doc_types=["plot_analysis"],
+                n_results=30,
+            )
+            
+            if not results:
+                # Fallback: try querying by each plot name
+                results = []
+                for img in images:
+                    plot_results = self.workflow_rag.query_relevant_context(
+                        query=img["name"],
+                        workflow_id=workflow_id,
+                        doc_types=["plot_analysis"],
+                        n_results=3,
+                    )
+                    results.extend(plot_results)
+            
+            # Build lookup from plot name to description
+            plot_descriptions: Dict[str, str] = {}
+            
+            for r in results:
+                metadata = r.get("metadata", {})
+                doc = r.get("document", "")
+                
+                plot_name = metadata.get("plot_name", "")
+                
+                if plot_name:
+                    # Extract the analysis part from the document
+                    if "Analysis:" in doc:
+                        analysis = doc.split("Analysis:")[-1].strip()
+                    else:
+                        analysis = doc
+                    
+                    # Truncate to reasonable length
+                    if len(analysis) > 500:
+                        analysis = analysis[:500] + "..."
+                    
+                    plot_descriptions[plot_name] = analysis
+                    
+                    # Also try matching without extension
+                    base_name = Path(plot_name).stem
+                    plot_descriptions[base_name] = analysis
+            
+            # Enrich images with descriptions
+            enriched_images = []
+            for img in images:
+                description = plot_descriptions.get(
+                    img["name"],
+                    plot_descriptions.get(
+                        Path(img["name"]).stem,
+                        img["description"]  # fallback to filename-based
+                    )
+                )
+                
+                enriched_images.append({
+                    "name": img["name"],
+                    "path": img["path"],
+                    "description": description,
+                })
+                
+                if description != img["description"]:
+                    self._emit(f"  📊 {img['name']}: Found RAG description")
+            
+            logger.info(f"📊 Enriched {len(enriched_images)} images with RAG descriptions")
+            return enriched_images
+            
+        except Exception as e:
+            logger.error(f"Failed to enrich images with RAG descriptions: {e}")
+            return images
     
     async def _plan_presentation(self, state: RevealJSState) -> RevealJSState:
         """
@@ -461,8 +702,14 @@ Focus your presentation on these verified topics.""")
 
 TARGET: {state['num_slides']} slides (including title and summary)
 
-WORKFLOW CONTEXT (from RAG - summarize ALL key points):
-{state['workflow_context'][:6000]}
+WORKFLOW CONTEXT (from RAG - summarize INFORMATION relevant to the topic):
+{state['workflow_context'][:5000]}
+
+PLOT ANALYSES (available visualizations and what they show):
+{state.get('plot_analyses', 'No plot analyses available')[:2000]}
+
+AVAILABLE IMAGES:
+{chr(10).join(f"- {img['name']}: {img.get('description', '')[:100]}" for img in state.get('available_images', [])[:10])}
 
 STYLE GUIDE:
 {state['style_context']}
@@ -488,11 +735,14 @@ CRITICAL REQUIREMENTS:
 2. DO NOT make up statistics, findings, or claims not in the context
 3. Every bullet point must be traceable to the source material
 4. If information isn't available, use fewer slides rather than inventing content
-5. Use varied layouts for visual interest
-6. Keep bullet points concise (max 10 words each)
-7. Include speaker notes citing which part of context supports each point
+5. Use PLOT ANALYSES to create slides that discuss visualizations accurately
+6. Match slide content to available images based on their descriptions
+7. Use varied layouts for visual interest
+8. Keep bullet points concise (max 10 words each)
+9. Include speaker notes citing which part of context supports each point
 
-The presentation must be GROUNDED in the provided context. No hallucination."""
+The presentation must be GROUNDED in the provided context. No hallucination.
+When discussing a plot, use the analysis description to accurately describe what it shows."""
 
         structured_llm = self.llm.with_structured_output(PresentationOutline)
         
@@ -835,7 +1085,7 @@ Return a JSON object:
     
     async def _match_images(self, state: RevealJSState) -> RevealJSState:
         """
-        Node: Match available images to slides.
+        Node: Match available images to slides using RAG descriptions.
         """
         images = state["available_images"]
         outline = state["outline"]
@@ -846,19 +1096,29 @@ Return a JSON object:
         
         self._emit(f"Matching {len(images)} images to slides...")
         
+        # Build slide descriptions
         slide_descriptions = []
         for slide in outline.slides:
-            desc = f"Slide {slide.slide_number}: '{slide.title}' ({slide.layout}) - {', '.join(slide.content[:2]) if slide.content else 'No content'}"
+            content_preview = ', '.join(slide.content[:3]) if slide.content else 'No content'
+            desc = f"Slide {slide.slide_number}: '{slide.title}' ({slide.layout})\n  Content: {content_preview}"
             slide_descriptions.append(desc)
         
-        image_descriptions = [f"- {img['name']}: {img['description']}" for img in images]
+        # Build image descriptions with RAG context
+        image_descriptions = []
+        for img in images:
+            # Use the enriched description from RAG
+            desc = img.get('description', img['name'])
+            # Truncate long descriptions for the prompt
+            if len(desc) > 200:
+                desc = desc[:200] + "..."
+            image_descriptions.append(f"- {img['name']}:\n  {desc}")
         
         prompt = f"""Match images to slides based on semantic relevance.
 
 SLIDES:
 {chr(10).join(slide_descriptions)}
 
-AVAILABLE IMAGES:
+AVAILABLE IMAGES (with descriptions from analysis):
 {chr(10).join(image_descriptions)}
 
 RULES:
@@ -867,7 +1127,10 @@ RULES:
 3. Slides with layout="image" MUST have exactly 1 image
 4. Content slides can have 0-1 images
 5. Each image can only be used ONCE
-6. Match based on topic alignment
+6. Match based on:
+   - Topic alignment between slide content and image description
+   - Data relevance (e.g., correlation plot for correlation discussion)
+   - Visual storytelling flow
 
 Return assignments for slides that should have images."""
 
@@ -877,7 +1140,7 @@ Return assignments for slides that should have images."""
             plan = await asyncio.to_thread(
                 structured_llm.invoke,
                 [
-                    SystemMessage(content="Match visualizations to presentation slides based on relevance."),
+                    SystemMessage(content="Match visualizations to presentation slides based on semantic relevance. Use the image descriptions to make informed matches."),
                     HumanMessage(content=prompt)
                 ]
             )
@@ -896,10 +1159,11 @@ Return assignments for slides that should have images."""
                     if img_name in image_lookup:
                         assignments[assignment.slide_number] = image_lookup[img_name]
                         used_images.add(img_name)
+                        self._emit(f"  Slide {assignment.slide_number} ← {img_name}")
                         break
             
             state["image_assignments"] = assignments
-            self._emit(f"Assigned {len(assignments)} images")
+            self._emit(f"Assigned {len(assignments)} images to slides")
             
         except Exception as e:
             logger.error(f"Image matching failed: {e}")
@@ -1201,6 +1465,7 @@ Be strict - the presentation should comprehensively cover the source material.""
             "workflow_context": "",
             "revealjs_snippets": "",
             "style_context": "",
+            "plot_analyses": "",
             "available_images": [],
             "outline": None,
             "image_assignments": {},
