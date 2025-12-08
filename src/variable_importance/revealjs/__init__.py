@@ -8,6 +8,14 @@ Components:
 - RevealJSDocsRAG: Shared singleton for RevealJS documentation
 - StyleMemory: Per-user style guide with semantic search
 - RevealJSBuilder: Standalone HTML generator
+- WebSearchClient: Web search for supplementary context
+
+Features:
+- Agent-based context gathering with RAG tools
+- Per-slide verification against RAG to prevent hallucination
+- Web search integration for supplementary information
+- Plot analysis from RAG for accurate visualization descriptions
+- Style guide learning from user feedback
 
 Usage:
     from variable_importance.revealjs import create_revealjs_presentation
@@ -17,6 +25,7 @@ Usage:
         workflow_id="my_workflow",
         stage_name="analysis",
         user_id="user123",
+        enable_web_search=True,  # Enable web search for extra context
     )
     
     # result.html_content contains standalone HTML
@@ -49,6 +58,8 @@ from .builder import RevealJSBuilder
 from .agent import (
     RevealJSAgent,
     create_revealjs_presentation,
+    WebSearchClient,
+    get_web_search_client,
 )
 
 
@@ -65,6 +76,10 @@ __all__ = [
     "get_revealjs_docs_rag",
     "StyleMemory",
     "get_style_memory",
+    
+    # Web search
+    "WebSearchClient",
+    "get_web_search_client",
     
     # Models
     "SlideContent",

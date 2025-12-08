@@ -3,6 +3,7 @@ RevealJS Presentation Agent
 
 LangGraph workflow with:
 - Context gathering agent with RAG query tools
+- Web search agent for supplementary information
 - Presentation planning with structured output
 - Validation loop ensuring complete, valid RevealJS output
 - Style guide integration and learning
@@ -34,6 +35,113 @@ from .builder import RevealJSBuilder
 
 
 # =============================================================================
+# WEB SEARCH UTILITIES
+# =============================================================================
+
+
+class WebSearchClient:
+    """
+    Web search client using DuckDuckGo.
+    
+    Provides search and content fetching capabilities.
+    """
+    
+    def __init__(self):
+        self._ddg = None
+        self._crawl4ai = None
+    
+    def _get_ddg(self):
+        """Lazy load DuckDuckGo search."""
+        if self._ddg is None:
+            try:
+                from ddgs import DDGS
+                self._ddg = DDGS()
+            except ImportError:
+                logger.warning("duckduckgo_search not installed")
+                return None
+        return self._ddg
+    
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
+        """
+        Search the web using DuckDuckGo.
+        
+        Returns list of {title, url, snippet} dicts.
+        """
+        ddg = self._get_ddg()
+        if not ddg:
+            return []
+        
+        try:
+            results = list(ddg.text(query, max_results=max_results))
+            return [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("href", r.get("link", "")),
+                    "snippet": r.get("body", r.get("snippet", "")),
+                }
+                for r in results
+            ]
+        except Exception as e:
+            logger.error(f"Web search failed: {e}")
+            return []
+    
+    async def fetch_content(self, url: str, max_length: int = 5000) -> str:
+        """
+        Fetch and extract content from a URL.
+        
+        Uses crawl4ai if available, falls back to basic requests.
+        """
+        try:
+            # Try crawl4ai first
+            from crawl4ai import AsyncWebCrawler
+            
+            async with AsyncWebCrawler() as crawler:
+                result = await crawler.arun(url=url)
+                if result.success:
+                    content = result.markdown or result.cleaned_html or ""
+                    return content[:max_length]
+        except ImportError:
+            pass
+        except Exception as e:
+            logger.warning(f"crawl4ai fetch failed: {e}")
+        
+        # Fallback to requests
+        try:
+            import requests
+            from bs4 import BeautifulSoup
+            
+            response = requests.get(url, timeout=10, headers={
+                "User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"
+            })
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            
+            # Remove scripts and styles
+            for tag in soup(["script", "style", "nav", "footer", "header"]):
+                tag.decompose()
+            
+            text = soup.get_text(separator="\n", strip=True)
+            return text[:max_length]
+            
+        except Exception as e:
+            logger.error(f"Content fetch failed: {e}")
+            return ""
+
+
+# Global web search client
+_web_search_client: Optional[WebSearchClient] = None
+
+
+def get_web_search_client() -> WebSearchClient:
+    """Get or create the web search client singleton."""
+    global _web_search_client
+    if _web_search_client is None:
+        _web_search_client = WebSearchClient()
+    return _web_search_client
+
+
+# =============================================================================
 # STATE DEFINITIONS
 # =============================================================================
 
@@ -47,12 +155,14 @@ class RevealJSState(TypedDict):
     stage_name: str
     num_slides: int
     custom_instructions: str
+    enable_web_search: bool  # Whether to use web search for additional context
     
     # Context gathered by agent
     workflow_context: str
     revealjs_snippets: str
     style_context: str
     plot_analyses: str  # Detailed plot descriptions from RAG
+    web_context: str  # Additional context from web search
     available_images: List[Dict[str, str]]
     
     # Planning outputs
@@ -106,6 +216,7 @@ class RevealJSAgent:
         user_id: str = "default",
         progress_callback: Optional[Callable[[str], None]] = None,
         max_iterations: int = 3,
+        enable_web_search: bool = True,
     ):
         self.llm_model = llm_model
         self.base_url = base_url
@@ -114,6 +225,7 @@ class RevealJSAgent:
         self.user_id = user_id
         self.progress_callback = progress_callback
         self.max_iterations = max_iterations
+        self.enable_web_search = enable_web_search
         
         # Initialize LLMs
         self.llm = ChatOllama(
@@ -131,6 +243,9 @@ class RevealJSAgent:
         # Initialize RAGs and memory
         self.docs_rag = get_revealjs_docs_rag()
         self.style_memory = get_style_memory(user_id)
+        
+        # Web search client
+        self.web_client = get_web_search_client() if enable_web_search else None
         
         # Builder
         self.builder = RevealJSBuilder(progress_callback=progress_callback)
@@ -157,12 +272,18 @@ class RevealJSAgent:
         output_manager = self.output_manager
         
         @tool
-        def query_workflow_context(query: str) -> str:
+        def query_workflow_context(query: str, doc_types: str = "") -> str:
             """
             Query the workflow RAG for analysis results, summaries, and findings.
+            Use this to get detailed context about data, analyses, methodology, and conclusions.
+            doc_types can be a comma-separated list of types to filter (document, summary, code_execution, plot_analysis, web_result).
+            use "" to search all types. Documents contain general information about methodologies and background, 
+            summaries contain concise overviews of results, code_execution contains code snippets and outputs,
+            web_result contains web search results added to the RAG for additional background context.
             
             Args:
                 query: Search query for relevant context
+                doc_types: Optional comma-separated doc types (document, summary, code_execution, plot_analysis, web_result)
             
             Returns:
                 Relevant context from the workflow
@@ -171,7 +292,7 @@ class RevealJSAgent:
                 return "No workflow context available."
             
             try:
-                type_list = None #[t.strip() for t in doc_types.split(",")] if doc_types else None
+                type_list = [t.strip() for t in doc_types.split(",")] if doc_types else None
                 
                 results = workflow_rag.query_relevant_context(
                     query=query,
@@ -370,7 +491,102 @@ class RevealJSAgent:
             except Exception as e:
                 return f"Error listing images: {e}"
         
-        return [query_workflow_context, query_revealjs_docs, get_style_preferences, query_plot_analyses, list_available_images]
+        # Web search tools (only if enabled)
+        web_client = self.web_client
+        
+        @tool
+        def web_search(query: str, max_results: int = 5) -> str:
+            """
+            Search the web for additional information on a topic.
+            
+            Use this to find supplementary context, definitions, industry standards,
+            or background information not available in the workflow RAG.
+            
+            Args:
+                query: Search query
+                max_results: Maximum number of results (1-10)
+            
+            Returns:
+                Search results with titles, URLs, and snippets
+            """
+            if not web_client:
+                return "Web search is not enabled."
+            
+            try:
+                results = web_client.search(query, max_results=min(max_results, 10))
+                
+                if not results:
+                    return f"No web results found for: {query}"
+                
+                output_parts = [f"## Web Search Results for: {query}\n"]
+                
+                for i, r in enumerate(results, 1):
+                    output_parts.append(f"### {i}. {r['title']}")
+                    output_parts.append(f"URL: {r['url']}")
+                    output_parts.append(f"{r['snippet']}\n")
+                
+                return "\n".join(output_parts)
+                
+            except Exception as e:
+                return f"Web search error: {e}"
+        
+        @tool
+        def fetch_web_page(url: str) -> str:
+            """
+            Fetch and extract content from a web page.
+            
+            Use this to get full content from a URL found in search results.
+            
+            Args:
+                url: The URL to fetch
+            
+            Returns:
+                Extracted text content from the page
+            """
+            if not web_client:
+                return "Web search is not enabled."
+            
+            try:
+                # Run async fetch in sync context
+                import asyncio
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # Already in async context, create task
+                        import concurrent.futures
+                        with concurrent.futures.ThreadPoolExecutor() as executor:
+                            future = executor.submit(
+                                asyncio.run,
+                                web_client.fetch_content(url)
+                            )
+                            content = future.result(timeout=30)
+                    else:
+                        content = loop.run_until_complete(web_client.fetch_content(url))
+                except RuntimeError:
+                    content = asyncio.run(web_client.fetch_content(url))
+                
+                if not content:
+                    return f"Could not extract content from: {url}"
+                
+                return f"## Content from {url}\n\n{content}"
+                
+            except Exception as e:
+                return f"Fetch error: {e}"
+        
+        # Build tools list
+        tools = [
+            query_workflow_context, 
+            query_revealjs_docs, 
+            get_style_preferences, 
+            query_plot_analyses, 
+            list_available_images
+        ]
+        
+        # Add web search tools if enabled
+        if web_client:
+            tools.extend([web_search, fetch_web_page])
+        
+        return tools
     
     # =========================================================================
     # WORKFLOW NODES
@@ -384,29 +600,42 @@ class RevealJSAgent:
         
         tools = self._create_rag_tools()
         
+        agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            middleware=[TodoListMiddleware()],
+        )
         
+        # Check if web search is enabled
+        web_search_enabled = state.get("enable_web_search", False) and self.web_client is not None
         
-        system_prompt = """You are a research assistant gathering context for a presentation.
+        web_search_instructions = """
+7. Use web_search to find supplementary information not in the RAG
+8. Search the web for: industry context, definitions, background information
+9. Use fetch_web_page to get full content from relevant search results""" if web_search_enabled else ""
+        
+        web_search_user_instructions = """
+WEB SEARCH (if needed for additional context):
+- Search the web for industry standards, definitions, or background
+- Fetch full content from relevant pages
+- Use web results to supplement (not replace) RAG context""" if web_search_enabled else ""
+        
+        system_prompt = f"""You are a research assistant gathering context for a presentation.
 
 Your goal is to thoroughly research the topic and gather ALL relevant information.
 
 INSTRUCTIONS:
 1. Query the workflow context multiple times with different queries to get comprehensive coverage
-2. Search for: documents, summaries, analysis results, key findings, data insights, conclusions
+2. Search for: summaries, analysis results, key findings, data insights, conclusions
 3. Query for plot analyses to understand what each visualization shows
 4. Get RevealJS documentation for relevant layouts and features
 5. Check user style preferences
-6. List available images with their descriptions
+6. List available images with their descriptions{web_search_instructions}
 
 Be thorough - make multiple queries to ensure you capture all important information.
-Plot analyses are especially important for matching visualizations to content."""
+Plot analyses are especially important for matching visualizations to content.
+{"Web search can supplement RAG data with external context." if web_search_enabled else ""}"""
 
-        agent = create_agent(
-            model=self.llm,
-            tools=tools,
-            middleware=[TodoListMiddleware()],
-            system_prompt=system_prompt
-        )
         user_message = f"""Research and gather all context for a presentation about: "{state['topic']}"
 
 Workflow ID: {state['workflow_id']}
@@ -417,16 +646,16 @@ Make multiple queries to the workflow context to gather:
 2. Key data points and statistics  
 3. Methodology and approach
 4. Conclusions and recommendations
-5. Additional insights and context
 
 IMPORTANT - Query for plot analyses to understand visualizations:
-6. Use query_plot_analyses to get detailed descriptions of all charts/plots
-7. This will help match the right images to the right slides
+5. Use query_plot_analyses to get detailed descriptions of all charts/plots
+6. This will help match the right images to the right slides
 
 Also get:
 - Relevant RevealJS code snippets for layouts
 - User style preferences
 - List of available images with their descriptions
+{web_search_user_instructions}
 
 Be comprehensive - query multiple times with different search terms."""
 
@@ -444,12 +673,15 @@ Be comprehensive - query multiple times with different search terms."""
             workflow_context_parts = []
             revealjs_parts = []
             plot_analysis_parts = []
+            web_context_parts = []
             
             for msg in final_messages:
                 content = getattr(msg, "content", "")
                 if isinstance(content, str):
                     # Categorize based on content
-                    if "## Plot Analyses" in content or "plot_analysis" in content.lower():
+                    if "## Web Search Results" in content or "## Web Results" in content or "## Content from http" in content:
+                        web_context_parts.append(content)
+                    elif "## Plot Analyses" in content or "plot_analysis" in content.lower():
                         plot_analysis_parts.append(content)
                     elif any(marker in content.lower() for marker in ["[summary", "[code_execution", "[plot_analysis", "---"]):
                         workflow_context_parts.append(content)
@@ -467,9 +699,11 @@ Be comprehensive - query multiple times with different search terms."""
             state["revealjs_snippets"] = "\n\n".join(revealjs_parts)
             state["style_context"] = self.style_memory.get_formatted_context()
             state["plot_analyses"] = "\n\n".join(plot_analysis_parts)
+            state["web_context"] = "\n\n".join(web_context_parts)
             state["messages"] = final_messages
             
-            self._emit(f"Gathered {len(workflow_context_parts)} context chunks, {len(plot_analysis_parts)} plot analyses")
+            web_msg = f", {len(web_context_parts)} web results" if web_context_parts else ""
+            self._emit(f"Gathered {len(workflow_context_parts)} context chunks, {len(plot_analysis_parts)} plot analyses{web_msg}")
             
         except Exception as e:
             logger.error(f"Context gathering failed: {e}")
@@ -477,6 +711,7 @@ Be comprehensive - query multiple times with different search terms."""
             state["revealjs_snippets"] = self._direct_docs_query("presentation slides layouts")
             state["style_context"] = self.style_memory.get_formatted_context()
             state["plot_analyses"] = self._direct_plot_analyses_query(state["workflow_id"])
+            state["web_context"] = ""
         
         # Get available images with RAG descriptions
         state["available_images"] = await self._get_images_with_descriptions(
@@ -698,16 +933,23 @@ Focus your presentation on these verified topics.""")
         
         style_defaults = self.style_memory.get_defaults()
         
+        # Build web context section if available
+        web_context = state.get('web_context', '')
+        web_context_section = f"""
+SUPPLEMENTARY WEB CONTEXT (use to enhance, not replace RAG content):
+{web_context[:2000]}
+""" if web_context else ""
+        
         prompt = f"""Create a presentation outline for: "{state['topic']}"
 
 TARGET: {state['num_slides']} slides (including title and summary)
 
-WORKFLOW CONTEXT (from RAG - summarize INFORMATION relevant to the topic):
+WORKFLOW CONTEXT (from RAG - PRIMARY source, summarize ALL key points):
 {state['workflow_context'][:5000]}
 
 PLOT ANALYSES (available visualizations and what they show):
 {state.get('plot_analyses', 'No plot analyses available')[:2000]}
-
+{web_context_section}
 AVAILABLE IMAGES:
 {chr(10).join(f"- {img['name']}: {img.get('description', '')[:100]}" for img in state.get('available_images', [])[:10])}
 
@@ -731,10 +973,10 @@ REVEALJS BEST PRACTICES:
 {validation_feedback}
 
 CRITICAL REQUIREMENTS:
-1. ONLY include information that appears in the WORKFLOW CONTEXT above
+1. PRIORITIZE WORKFLOW CONTEXT - it is the primary source of truth
 2. DO NOT make up statistics, findings, or claims not in the context
 3. Every bullet point must be traceable to the source material
-4. If information isn't available, use fewer slides rather than inventing content
+4. Web context can provide background/definitions but RAG data takes precedence
 5. Use PLOT ANALYSES to create slides that discuss visualizations accurately
 6. Match slide content to available images based on their descriptions
 7. Use varied layouts for visual interest
@@ -785,13 +1027,12 @@ When discussing a plot, use the analysis description to accurately describe what
         """
         Node: Verify each slide has supporting evidence in RAG.
         
-        For each slide:
-        1. Query RAG with slide-specific terms
-        2. Check if sufficient supporting content exists
-        3. Store retrieved context per slide
-        4. Flag slides without evidence
+        Uses a context gathering agent for each slide to:
+        1. Query RAG with multiple search strategies
+        2. Find supporting evidence for slide claims
+        3. Flag slides without sufficient evidence
         """
-        self._emit("Verifying slide content against RAG...")
+        self._emit("Verifying slide content with RAG agent...")
         
         outline = state["outline"]
         if not outline:
@@ -808,19 +1049,11 @@ When discussing a plot, use the analysis description to accurately describe what
                 slide_contexts[slide.slide_number] = ""
                 continue
             
-            # Build search query from slide content
-            search_terms = []
-            if slide.title:
-                search_terms.append(slide.title)
-            search_terms.extend(slide.content[:3])  # First 3 bullet points
-            
-            query = " ".join(search_terms)
-            
             self._emit(f"  Verifying slide {slide.slide_number}: {slide.title or 'Untitled'}")
             
-            # Query RAG for supporting content
-            context = await self._query_slide_context(
-                query=query,
+            # Use agent to gather context for this slide
+            context = await self._gather_slide_context_with_agent(
+                slide=slide,
                 workflow_id=state["workflow_id"],
             )
             
@@ -869,12 +1102,313 @@ When discussing a plot, use the analysis description to accurately describe what
         
         return state
     
-    async def _query_slide_context(self, query: str, workflow_id: str) -> str:
-        """Query RAG for slide-specific content."""
+    def _create_slide_context_tools(self):
+        """Create tools for the slide context gathering agent."""
+        
+        workflow_rag = self.workflow_rag
+        
+        @tool
+        def search_workflow_context(query: str) -> str:
+            """
+            Search the workflow RAG for content related to the query.
+            
+            Args:
+                query: Search terms to find relevant context
+            
+            Returns:
+                Relevant context from the workflow RAG
+            """
+            if not workflow_rag or not workflow_rag.enabled:
+                return "No workflow context available."
+            
+            try:
+                results = workflow_rag.query_relevant_context(
+                    query=query,
+                    n_results=10,
+                )
+                
+                if not results:
+                    return f"No results found for: {query}"
+                
+                parts = []
+                for r in results:
+                    doc = r.get("document", "")
+                    metadata = r.get("metadata", {})
+                    doc_type = metadata.get("type", "unknown")
+                    parts.append(f"[{doc_type}]\n{doc}")
+                
+                return "\n---\n".join(parts)
+                
+            except Exception as e:
+                return f"Error searching: {e}"
+        
+        @tool
+        def search_summaries(query: str) -> str:
+            """
+            Search specifically for summary documents in RAG.
+            
+            Args:
+                query: Search terms
+            
+            Returns:
+                Relevant summaries
+            """
+            if not workflow_rag or not workflow_rag.enabled:
+                return "No workflow context available."
+            
+            try:
+                results = workflow_rag.query_relevant_context(
+                    query=query,
+                    doc_types=["summary", "document", "web_result"],
+                    n_results=10,
+                )
+                
+                if not results:
+                    return f"No summaries found for: {query}"
+                
+                parts = []
+                for r in results:
+                    doc = r.get("document", "")
+                    parts.append(doc)
+                
+                return "\n---\n".join(parts)
+                
+            except Exception as e:
+                return f"Error searching summaries: {e}"
+        
+        @tool
+        def search_code_results(query: str) -> str:
+            """
+            Search for code execution results and outputs in RAG.
+            
+            Args:
+                query: Search terms related to code or analysis
+            
+            Returns:
+                Relevant code execution results
+            """
+            if not workflow_rag or not workflow_rag.enabled:
+                return "No workflow context available."
+            
+            try:
+                results = workflow_rag.query_relevant_context(
+                    query=query,
+                    doc_types=["code_execution"],
+                    n_results=10,
+                )
+                
+                if not results:
+                    return f"No code results found for: {query}"
+                
+                parts = []
+                for r in results:
+                    doc = r.get("document", "")
+                    parts.append(doc)
+                
+                return "\n---\n".join(parts)
+                
+            except Exception as e:
+                return f"Error searching code results: {e}"
+        
+        @tool
+        def search_plot_analyses(query: str) -> str:
+            """
+            Search for plot/visualization analyses in RAG.
+            
+            Args:
+                query: Search terms related to plots or visualizations
+            
+            Returns:
+                Relevant plot analyses
+            """
+            if not workflow_rag or not workflow_rag.enabled:
+                return "No workflow context available."
+            
+            try:
+                results = workflow_rag.query_relevant_context(
+                    query=query,
+                    doc_types=["plot_analysis"],
+                    n_results=10,
+                )
+                
+                if not results:
+                    return f"No plot analyses found for: {query}"
+                
+                parts = []
+                for r in results:
+                    doc = r.get("document", "")
+                    metadata = r.get("metadata", {})
+                    plot_name = metadata.get("plot_name", "Unknown")
+                    parts.append(f"Plot: {plot_name}\n{doc}")
+                
+                return "\n---\n".join(parts)
+                
+            except Exception as e:
+                return f"Error searching plot analyses: {e}"
+        
+        # Web search tools for slides
+        web_client = self.web_client
+        
+        @tool
+        def web_search_for_slide(query: str) -> str:
+            """
+            Search the web for additional context to support slide claims.
+            
+            Use this when RAG doesn't have sufficient information to verify a claim,
+            or to find supplementary data, definitions, or industry context.
+            
+            Args:
+                query: Search query related to slide content
+            
+            Returns:
+                Web search results with snippets
+            """
+            if not web_client:
+                return "Web search is not enabled."
+            
+            try:
+                results = web_client.search(query, max_results=5)
+                
+                if not results:
+                    return f"No web results for: {query}"
+                
+                parts = ["## Web Results\n"]
+                for r in results:
+                    parts.append(f"**{r['title']}**")
+                    parts.append(f"{r['snippet']}\n")
+                
+                return "\n".join(parts)
+                
+            except Exception as e:
+                return f"Web search error: {e}"
+        
+        # Build tools list
+        tools = [
+            search_workflow_context, 
+            search_summaries, 
+            search_code_results, 
+            search_plot_analyses
+        ]
+        
+        # Add web search if enabled
+        if web_client:
+            tools.append(web_search_for_slide)
+        
+        return tools
+    
+    async def _gather_slide_context_with_agent(
+        self,
+        slide: SlideContent,
+        workflow_id: str,
+    ) -> str:
+        """
+        Use an agent with tools to gather comprehensive context for a slide.
+        
+        The agent will make multiple queries to find supporting evidence.
+        """
+        tools = self._create_slide_context_tools()
+        
+        
+        
+        # Build slide description for the agent
+        slide_content = f"""
+Title: {slide.title or 'Untitled'}
+Layout: {slide.layout}
+Content points:
+{chr(10).join('- ' + p for p in slide.content)}
+Speaker notes: {slide.speaker_notes or 'None'}
+"""
+        
+        # Check if web search is available
+        web_search_available = self.web_client is not None
+        web_instructions = """
+6. If RAG doesn't have sufficient evidence, use web_search_for_slide to find supporting information
+7. Web search can provide definitions, industry context, or background data""" if web_search_available else ""
+        
+        web_user_instructions = """
+5. If RAG evidence is insufficient, search the web for supporting context""" if web_search_available else ""
+        
+        system_prompt = f"""You are a fact-checker finding evidence for presentation slide claims.
+
+Your goal is to find content that supports the slide's claims.
+
+INSTRUCTIONS:
+1. Extract key claims and topics from the slide
+2. Search the workflow context for supporting evidence
+3. Try multiple search queries with different terms
+4. Search summaries, code results, and plot analyses as relevant
+5. Compile all supporting evidence found{web_instructions}
+
+Be thorough - use multiple tools and queries to find comprehensive support.
+RAG context is the primary source; web search supplements when RAG is insufficient."""
+        agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            middleware=[TodoListMiddleware()],
+            system_prompt=system_prompt
+        )
+        user_message = f"""Find supporting evidence for this slide:
+
+{slide_content}
+
+Search for:
+1. Evidence supporting each bullet point
+2. Data or statistics mentioned
+3. Related plot analyses if discussing visualizations
+4. Any relevant summaries or code results{web_user_instructions}
+
+Make multiple queries to gather comprehensive support. Return all relevant context found."""
+
+        messages = [
+            HumanMessage(content=user_message),
+        ]
+        
+        try:
+            result = await agent.ainvoke({"messages": messages})
+            
+            final_messages = result.get("messages", [])
+            
+            # Collect all context from tool outputs
+            context_parts = []
+            
+            for msg in final_messages:
+                content = getattr(msg, "content", "")
+                if isinstance(content, str):
+                    # Include tool outputs (they contain RAG and web results)
+                    if any(marker in content for marker in ["---", "[summary]", "[code_execution]", "[plot_analysis]", "Plot:", "## Web Results"]):
+                        context_parts.append(content)
+            
+            # Also include final AI summary
+            for msg in reversed(final_messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    if msg.content not in context_parts:
+                        context_parts.append(msg.content)
+                    break
+            
+            return "\n\n".join(context_parts)
+            
+        except Exception as e:
+            logger.error(f"Slide context agent failed: {e}")
+            # Fallback to direct query
+            return await self._fallback_slide_context_query(slide, workflow_id)
+    
+    async def _fallback_slide_context_query(
+        self,
+        slide: SlideContent,
+        workflow_id: str,
+    ) -> str:
+        """Fallback direct RAG query if agent fails."""
         if not self.workflow_rag or not self.workflow_rag.enabled:
             return ""
         
         try:
+            # Build search query from slide content
+            search_terms = []
+            if slide.title:
+                search_terms.append(slide.title)
+            search_terms.extend(slide.content[:3])
+            query = " ".join(search_terms)
+            
             results = self.workflow_rag.query_relevant_context(
                 query=query,
                 workflow_id=workflow_id,
@@ -884,16 +1418,16 @@ When discussing a plot, use the analysis description to accurately describe what
             if not results:
                 return ""
             
-            context_parts = []
+            parts = []
             for r in results:
                 doc = r.get("document", "")
                 if doc:
-                    context_parts.append(doc)
+                    parts.append(doc)
             
-            return "\n---\n".join(context_parts)
+            return "\n---\n".join(parts)
             
         except Exception as e:
-            logger.error(f"Slide context query failed: {e}")
+            logger.error(f"Fallback slide context query failed: {e}")
             return ""
     
     async def _evaluate_slide_support(
@@ -986,8 +1520,8 @@ Respond with ONLY a JSON object: {{"score": 0.X, "reason": "brief explanation"}}
         """
         Node: Refine each slide's content using the retrieved context.
         
-        Ensures bullet points are derived from actual RAG content,
-        not LLM hallucination.
+        Uses an agent to extract grounded content from RAG,
+        ensuring bullet points are derived from actual data.
         """
         self._emit("Grounding slide content in retrieved context...")
         
@@ -1008,13 +1542,21 @@ Respond with ONLY a JSON object: {{"score": 0.X, "reason": "brief explanation"}}
             context = slide_contexts.get(slide.slide_number, "")
             
             if not context:
-                # No context - keep slide but mark in notes
+                # No context - try to gather more with agent
+                self._emit(f"  Slide {slide.slide_number}: No cached context, gathering fresh...")
+                context = await self._gather_slide_context_with_agent(
+                    slide=slide,
+                    workflow_id=state["workflow_id"],
+                )
+            
+            if not context:
+                # Still no context - mark in notes
                 slide.speaker_notes = "Note: Limited source context for this slide."
                 refined_slides.append(slide)
                 continue
             
-            # Use LLM to extract grounded content from context
-            refined_slide = await self._refine_slide_from_context(slide, context)
+            # Use agent to extract grounded content
+            refined_slide = await self._refine_slide_with_agent(slide, context)
             refined_slides.append(refined_slide)
         
         outline.slides = refined_slides
@@ -1023,45 +1565,144 @@ Respond with ONLY a JSON object: {{"score": 0.X, "reason": "brief explanation"}}
         self._emit(f"Grounded {len(refined_slides)} slides in RAG context")
         return state
     
-    async def _refine_slide_from_context(
+    async def _refine_slide_with_agent(
         self,
         slide: SlideContent,
         context: str,
     ) -> SlideContent:
         """
-        Refine a slide's content to be grounded in retrieved context.
+        Use an agent to refine slide content based on retrieved context.
+        
+        The agent extracts only facts present in the context.
         """
-        prompt = f"""Refine this slide's content using ONLY information from the provided context.
+        tools = self._create_slide_context_tools()
+        
+        
+        
+        system_prompt = """You are a content editor ensuring presentation slides are factually grounded.
+
+Your job is to rewrite slide content using ONLY facts from the provided context.
+If a claim cannot be verified in the context, remove it.
+If you need more context, use the search tools to find it.
+
+RULES:
+1. Every bullet point must be directly supported by the context
+2. Include specific numbers, percentages, or findings from context
+3. Remove any claims not found in context
+4. Keep bullets concise (max 10 words each)
+5. Maximum 5 bullet points per slide
+6. Add speaker notes citing where information came from"""
+        agent = create_agent(
+            model=self.llm,
+            tools=tools,
+            middleware=[TodoListMiddleware()],
+            system_prompt=system_prompt
+        )
+        user_message = f"""Rewrite this slide's content using ONLY facts from the context.
 
 CURRENT SLIDE:
 Title: {slide.title}
 Layout: {slide.layout}
+Content:
+{chr(10).join('- ' + p for p in slide.content)}
+
+RETRIEVED CONTEXT:
+{context[:4000]}
+
+If you need additional context, use the search tools to find supporting evidence.
+
+Return your response as:
+TITLE: (keep same or slightly refine)
+BULLETS:
+- bullet 1 (grounded in context)
+- bullet 2 (grounded in context)
+...
+SPEAKER_NOTES: (cite sources from context)"""
+
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_message),
+        ]
+        
+        try:
+            result = await agent.ainvoke({"messages": messages})
+            
+            final_messages = result.get("messages", [])
+            
+            # Get final response
+            final_response = ""
+            for msg in reversed(final_messages):
+                if isinstance(msg, AIMessage) and msg.content:
+                    final_response = msg.content
+                    break
+            
+            # Parse the response
+            slide = self._parse_refined_slide(slide, final_response)
+            
+        except Exception as e:
+            logger.error(f"Slide refinement agent failed: {e}")
+            # Fallback to direct LLM refinement
+            slide = await self._fallback_refine_slide(slide, context)
+        
+        return slide
+    
+    def _parse_refined_slide(self, slide: SlideContent, response: str) -> SlideContent:
+        """Parse agent response to extract refined slide content."""
+        lines = response.strip().split("\n")
+        
+        new_bullets = []
+        new_notes = ""
+        in_bullets = False
+        in_notes = False
+        
+        for line in lines:
+            line = line.strip()
+            
+            if line.upper().startswith("TITLE:"):
+                # Keep original title for consistency
+                pass
+            elif line.upper().startswith("BULLETS:"):
+                in_bullets = True
+                in_notes = False
+            elif line.upper().startswith("SPEAKER_NOTES:") or line.upper().startswith("SPEAKER NOTES:"):
+                in_bullets = False
+                in_notes = True
+                # Get content after the label
+                rest = line.split(":", 1)
+                if len(rest) > 1 and rest[1].strip():
+                    new_notes = rest[1].strip()
+            elif in_bullets and line.startswith("-"):
+                bullet = line[1:].strip()
+                if bullet:
+                    new_bullets.append(bullet)
+            elif in_notes and line:
+                new_notes += " " + line
+        
+        if new_bullets:
+            slide.content = new_bullets[:5]  # Max 5 bullets
+        if new_notes:
+            slide.speaker_notes = new_notes.strip()
+        
+        return slide
+    
+    async def _fallback_refine_slide(self, slide: SlideContent, context: str) -> SlideContent:
+        """Fallback direct LLM refinement if agent fails."""
+        prompt = f"""Refine this slide using ONLY facts from the context.
+
+SLIDE:
+Title: {slide.title}
 Content: {chr(10).join('- ' + p for p in slide.content)}
 
-RETRIEVED CONTEXT (source of truth):
+CONTEXT:
 {context[:3000]}
 
-INSTRUCTIONS:
-1. Keep the same title and layout
-2. Rewrite bullet points using ONLY facts from the context
-3. Include specific numbers, percentages, or findings from context
-4. Remove any claims not supported by context
-5. Add speaker notes citing the source
-6. Keep bullets concise (max 10 words each)
-7. Maximum 5 bullet points
-
-Return a JSON object:
-{{
-    "title": "{slide.title}",
-    "content": ["bullet1", "bullet2", ...],
-    "speaker_notes": "Context sources: ..."
-}}"""
+Return JSON: {{"content": ["bullet1", "bullet2"], "speaker_notes": "sources..."}}"""
 
         try:
             response = await asyncio.to_thread(
                 self.llm.invoke,
                 [
-                    SystemMessage(content="Extract slide content strictly from provided context. No hallucination."),
+                    SystemMessage(content="Extract slide content strictly from context. No hallucination."),
                     HumanMessage(content=prompt)
                 ]
             )
@@ -1077,9 +1718,9 @@ Return a JSON object:
                     slide.speaker_notes = data.get("speaker_notes", slide.speaker_notes)
                 except json.JSONDecodeError:
                     pass
-            
+                    
         except Exception as e:
-            logger.error(f"Slide refinement failed: {e}")
+            logger.error(f"Fallback slide refinement failed: {e}")
         
         return slide
     
@@ -1147,7 +1788,7 @@ Return assignments for slides that should have images."""
             
             assignments = {}
             used_images = set()
-            image_lookup = {img["name"]: img["path"] for img in images}
+            image_lookup = {img["name"]: img["path"] if Path(img["path"]).is_file() else Path(self.output_manager.get_stage_dir("analysis"))/'plots'/img['path'] for img in images}
             
             for assignment in plan.assignments:
                 for img_path in assignment.image_paths:
@@ -1462,10 +2103,12 @@ Be strict - the presentation should comprehensively cover the source material.""
             "stage_name": stage_name,
             "num_slides": num_slides,
             "custom_instructions": custom_instructions,
+            "enable_web_search": self.enable_web_search,
             "workflow_context": "",
             "revealjs_snippets": "",
             "style_context": "",
             "plot_analyses": "",
+            "web_context": "",
             "available_images": [],
             "outline": None,
             "image_assignments": {},
@@ -1594,10 +2237,30 @@ async def create_revealjs_presentation(
     base_url: str = "http://100.91.155.118:11434",
     progress_callback: Optional[Callable[[str], None]] = None,
     max_iterations: int = 3,
+    enable_web_search: bool = True,
     **kwargs,
 ) -> GeneratedPresentation:
     """
     Convenience function to create a Reveal.js presentation.
+    
+    Args:
+        topic: Presentation topic
+        workflow_id: Workflow ID for RAG context
+        stage_name: Stage containing analysis results
+        workflow_rag: ContextRAG instance for workflow data
+        output_manager: OutputManager for image discovery
+        user_id: User ID for style guide
+        num_slides: Target number of slides
+        custom_instructions: Additional instructions for the LLM
+        llm_model: LLM model name
+        base_url: Ollama base URL
+        progress_callback: Callback for progress updates
+        max_iterations: Max validation/planning iterations
+        enable_web_search: Whether to enable web search for additional context
+        **kwargs: Additional args (theme, transition, colors)
+    
+    Returns:
+        GeneratedPresentation with HTML content and metadata
     """
     agent = RevealJSAgent(
         llm_model=llm_model,
@@ -1607,6 +2270,7 @@ async def create_revealjs_presentation(
         user_id=user_id,
         progress_callback=progress_callback,
         max_iterations=max_iterations,
+        enable_web_search=enable_web_search,
     )
     
     return await agent.create_presentation(
